@@ -1,0 +1,6 @@
+{
+  "name": "PinGrab",
+  "description": "Smart Pinterest Search & High-Res Bulk Downloader — ad-free pin discovery, full-resolution image upgrading, and one-click ZIP batch downloads.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
