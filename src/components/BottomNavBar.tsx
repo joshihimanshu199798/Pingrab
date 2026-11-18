@@ -1,16 +1,6 @@
-import { Compass, Heart, LayoutGrid } from 'lucide-react';
+import { Compass, FolderHeart, LayoutGrid, Sliders } from 'lucide-react';
 import { AppTab } from '../types/pin';
-import { WALLPAPER_CATEGORY_PACKS } from './BottomNavBarData';
-
-export interface WallpaperCategoryPack {
-  id: string;
-  title: string;
-  subtitle: string;
-  query: string;
-  badge: string;
-  gradient: string;
-  accentColor: string;
-}
+export type { PackDeviceOrientation, WallpaperCategoryPack } from './BottomNavBarData';
 
 interface BottomNavBarProps {
   activeTab: AppTab;
@@ -31,29 +21,33 @@ export function BottomNavBar({
   }> = [
     {
       id: 'explore',
-      label: 'Explore',
+      label: 'Discover',
       icon: Compass,
     },
     {
       id: 'categories',
-      label: 'Categories',
+      label: 'Wallpapers',
       icon: LayoutGrid,
-      badge: WALLPAPER_CATEGORY_PACKS.length,
+    },
+    {
+      id: 'studio',
+      label: 'Studio',
+      icon: Sliders,
     },
     {
       id: 'favorites',
-      label: 'Saved Vault',
-      icon: Heart,
+      label: 'Library',
+      icon: FolderHeart,
       badge: favoritesCount > 0 ? favoritesCount : undefined,
     },
   ];
 
   return (
     <nav
-      aria-label="Wallpaper app bottom navigation"
-      className="fixed inset-x-0 bottom-0 z-30 border-t border-[#E5E7EB]/90 bg-white/92 px-3 py-2 backdrop-blur-xl dark:border-[#1E222B] dark:bg-[#0B0D10]/92"
+      aria-label="PinGrab primary bottom navigation"
+      className="fixed inset-x-0 bottom-0 z-30 w-full border-t border-slate-200/80 bg-white/95 px-2 pt-1.5 pb-[calc(0.45rem+env(safe-area-inset-bottom,0px))] backdrop-blur-xl dark:border-white/[0.07] dark:bg-[#101010]/95"
     >
-      <div className="mx-auto grid max-w-md grid-cols-3 gap-2">
+      <div className="mx-auto grid w-full max-w-lg grid-cols-4 gap-1.5 sm:gap-2">
         {navItems.map((item) => {
           const Icon = item.icon;
           const isActive = activeTab === item.id;
@@ -64,38 +58,32 @@ export function BottomNavBar({
               type="button"
               onClick={() => onSelectTab(item.id)}
               aria-current={isActive ? 'page' : undefined}
-              className={`group relative flex flex-col items-center justify-center gap-1 rounded-2xl py-2 text-xs font-medium transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E60023] ${
+              className={`group relative flex min-w-0 flex-col items-center justify-center gap-0.5 rounded-[14px] px-1.5 py-1.5 text-xs font-semibold transition-all duration-200 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D91B42] ${
                 isActive
-                  ? 'bg-[#E60023]/12 text-[#E60023] dark:bg-[#E60023]/20 dark:text-[#FF4D67]'
-                  : 'text-[#6B7280] hover:bg-[#F3F4F6] hover:text-[#111827] dark:text-[#9CA3AF] dark:hover:bg-[#14171D] dark:hover:text-[#F3F4F6]'
+                  ? 'bg-[#D91B42] text-white shadow-[0_6px_18px_rgba(255,49,90,0.38)]'
+                  : 'text-[#6B7280] hover:bg-[#F3F4F6] hover:text-[#111827] dark:text-[#9CA3AF] dark:hover:bg-[#171717] dark:hover:text-white'
               }`}
             >
               <div className="relative flex items-center justify-center">
                 <Icon
-                  className={`h-5 w-5 transition-transform duration-150 group-hover:scale-105 ${
-                    item.id === 'favorites' && isActive ? 'fill-current' : ''
-                  }`}
+                  className="h-4.5 w-4.5 transition-transform duration-150 group-hover:scale-105"
                   aria-hidden="true"
                 />
                 {item.badge !== undefined && (
                   <span
-                    className={`absolute -top-1.5 -right-3.5 inline-flex min-w-[18px] items-center justify-center rounded-full px-1 py-0.2 font-mono text-[9px] font-bold leading-tight tabular-nums ${
+                    className={`absolute -top-1.5 -right-3.5 inline-flex min-w-[16px] items-center justify-center rounded-full px-1 py-0.5 font-mono text-[8px] font-bold leading-none tabular-nums ${
                       isActive
-                        ? 'bg-[#E60023] text-white'
-                        : 'bg-[#E5E7EB] text-[#374151] dark:bg-[#1E222B] dark:text-[#D1D5DB]'
+                        ? 'bg-white text-[#D91B42] shadow-xs'
+                        : 'bg-[#E5E7EB] text-[#374151] dark:bg-[#171717] dark:text-[#D1D5DB] dark:border dark:border-white/10'
                     }`}
                   >
                     {item.badge}
                   </span>
                 )}
               </div>
-              <span className="text-[11px] font-semibold tracking-tight">{item.label}</span>
-              {isActive && (
-                <span
-                  aria-hidden="true"
-                  className="absolute bottom-1 h-0.5 w-6 rounded-full bg-[#E60023] dark:bg-[#FF4D67]"
-                />
-              )}
+              <span className="truncate text-[10px] sm:text-[11px] font-semibold tracking-tight">
+                {item.label}
+              </span>
             </button>
           );
         })}

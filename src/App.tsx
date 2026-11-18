@@ -1,37 +1,59 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
-  ArrowUpRight,
+  ArrowUpDown,
+  Camera,
   CheckCircle2,
+  Clock,
   Database,
-  Heart,
   Image as ImageIcon,
   Loader2,
   RefreshCw,
   RotateCcw,
+  Search,
+  Sliders,
   Smartphone,
-  Sparkles,
-  Tag,
-  Trash2,
+  Upload,
+  X,
 } from 'lucide-react';
 import { BatchDownloadBar } from './components/BatchDownloadBar';
 import { BottomNavBar } from './components/BottomNavBar';
-import { WALLPAPER_CATEGORY_PACKS } from './components/BottomNavBarData';
+import { WallpaperCategoryPack } from './components/BottomNavBarData';
+import { CollectionsView } from './components/CollectionsView';
 import { FeaturedTodaySection } from './components/FeaturedTodaySection';
 import { FilterModal } from './components/FilterModal';
 import { LightboxModal } from './components/LightboxModal';
 import { PinCard } from './components/PinCard';
-import { TopCommandBar } from './components/TopCommandBar';
+import { SettingsModal } from './components/SettingsModal';
+import { SmartLibraryView } from './components/SmartLibraryView';
+import { QUICK_SEARCH_TOPICS, TopCommandBar } from './components/TopCommandBar';
+import { WallpaperStudioEditor } from './components/WallpaperStudioEditor';
 import {
-  clearFavoritePins,
+  addPinsToSmartCollection,
+  clearDownloadHistory,
   clearRecentSearches,
+  clearRecentlyViewedPins,
+  clearSearchCacheOnly,
+  createSmartCollection,
+  deleteSmartCollection,
   formatRelativeTime,
+  getDownloadHistory,
   getFavoritePins,
   getRecentSearches,
+  getRecentlyViewedPins,
+  getSmartCollections,
+  getTrueResolutionTier,
+  getUserSettings,
+  recordRecentlyViewedPin,
+  removeFavoritePinIds,
   removeRecentSearch,
+  renameSmartCollection,
   saveCachedSearch,
   saveRecentSearch,
+  saveUserSettings,
   toggleFavoritePin,
+  togglePinInSmartCollection,
+  updateFavoritePinNote,
 } from './services/cacheService';
 import {
   downloadBatchZip,
@@ -44,12 +66,18 @@ import { generateTagsForPins, hydratePinsWithCachedTags } from './services/tagSe
 import {
   AppTab,
   AspectFilter,
+  DownloadHistoryEntry,
+  GridDensity,
   PinItem,
   RecentSearchEntry,
+  ResolutionFilter,
   SearchMeta,
   SearchMode,
   SearchResponse,
+  SmartCollection,
   SortOption,
+  UserSettings,
+  VisualAnalysisResult,
 } from './types/pin';
 
 const DEFAULT_QUERY = 'AMOLED Dark Phone Wallpaper 4K';
@@ -64,10 +92,23 @@ function matchesAspectFilter(w: number, h: number, filter: AspectFilter): boolea
   return ratio > 1.12;
 }
 
+function matchesResolutionFilter(w: number, h: number, filter: ResolutionFilter): boolean {
+  if (filter === 'all') return true;
+  const tier = getTrueResolutionTier(w, h);
+  if (filter === 'uhd-4k') return tier === '4K';
+  if (filter === 'qhd-2k') return tier === '4K' || tier === '2K';
+  if (filter === 'fhd-1080p') return tier === '4K' || tier === '2K' || tier === 'FHD';
+  if (filter === 'hd-720p') return tier !== 'SD';
+  return true;
+}
+
 function hexToRgb(hex: string): { r: number; g: number; b: number } {
   let clean = hex.replace('#', '');
   if (clean.length === 3) {
-    clean = clean.split('').map((c) => c + c).join('');
+    clean = clean
+      .split('')
+      .map((c) => c + c)
+      .join('');
   }
   const num = parseInt(clean, 16);
   return {
@@ -135,13 +176,24 @@ function matchesColorPalette(hex: string, paletteId: string | null): boolean {
 }
 
 export default function App() {
-  const [isDark, setIsDark] = useState(true);
-  const [hapticsEnabled, setHapticsEnabled] = useState(true);
+  const [userSettings, setUserSettings] = useState<UserSettings>(() => getUserSettings());
   const [activeTab, setActiveTab] = useState<AppTab>('explore');
-  const [inputValue, setInputValue] = useState(DEFAULT_QUERY);
+  // Keep search input clean (empty) by default unless user explicitly types a query
+  const [inputValue, setInputValue] = useState('');
   const [activeQuery, setActiveQuery] = useState(DEFAULT_QUERY);
   const [rawPins, setRawPins] = useState<PinItem[]>([]);
   const [favorites, setFavorites] = useState<PinItem[]>(() => getFavoritePins());
+  const [collections, setCollections] = useState<SmartCollection[]>(() =>
+    getSmartCollections()
+  );
+  const [recentlyViewed, setRecentlyViewed] = useState<PinItem[]>(() =>
+    getRecentlyViewedPins()
+  );
+  const [downloadHistory, setDownloadHistory] = useState<DownloadHistoryEntry[]>(() =>
+    getDownloadHistory()
+  );
+  const [studioActivePin, setStudioActivePin] = useState<PinItem | null>(null);
+
   const [recentlyAppliedPinId, setRecentlyAppliedPinId] = useState<string | null>(null);
   const [appliedToastMessage, setAppliedToastMessage] = useState<string | null>(null);
 
@@ -159,25 +211,40 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [searchProgress, setSearchProgress] = useState<SearchProgress | null>(null);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
-  const [isPrefetching, setIsPrefetching] = useState(false);
-  const [hasPrefetchedNext, setHasPrefetchedNext] = useState(false);
+  const [, setIsPrefetching] = useState(false);
+  const [, setHasPrefetchedNext] = useState(false);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [activeSearchQuery, setActiveSearchQuery] = useState<string>(DEFAULT_QUERY);
   const [hasMore, setHasMore] = useState(false);
 
-  const [sortBy, setSortBy] = useState<SortOption>('vertical-first');
+  const [sortBy, setSortBy] = useState<SortOption>('popular');
   const [aspectFilter, setAspectFilter] = useState<AspectFilter>('all');
+  const [resolutionFilter, setResolutionFilter] = useState<ResolutionFilter>('all');
   const [colorPaletteFilter, setColorPaletteFilter] = useState<string | null>(null);
   const [hdOnly, setHdOnly] = useState(false);
   const [lockscreenSim, setLockscreenSim] = useState(false);
   const [isSelectMode, setIsSelectMode] = useState(false);
   const [isFiltersModalOpen, setIsFiltersModalOpen] = useState(false);
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [activeTag, setActiveTag] = useState<string | null>(null);
-  const [isTagging, setIsTagging] = useState(false);
+
+  // Visual AI Search Modal State
+  const [isVisualSearchOpen, setIsVisualSearchOpen] = useState(false);
+  const [visualPreviewDataUrl, setVisualPreviewDataUrl] = useState<string | null>(null);
+  const [isAnalyzingVisual, setIsAnalyzingVisual] = useState(false);
+  const [visualResult, setVisualResult] = useState<VisualAnalysisResult | null>(null);
+  const [visualError, setVisualError] = useState<string | null>(null);
+  const visualFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [highlightedIndex, setHighlightedIndex] = useState<number>(0);
   const [lightboxPinId, setLightboxPinId] = useState<string | null>(null);
+  const [lightboxInitialFullscreen, setLightboxInitialFullscreen] = useState(false);
+
+  // Collections (Wallpapers tab) opened pack & custom collection state
+  const [openedPack, setOpenedPack] = useState<WallpaperCategoryPack | null>(null);
+  const [openedCustomCollectionId, setOpenedCustomCollectionId] = useState<string | null>(null);
+  const [openedPackPins, setOpenedPackPins] = useState<PinItem[]>([]);
 
   const [isBundling, setIsBundling] = useState(false);
   const [zipProgress, setZipProgress] = useState<{ completed: number; total: number } | null>(
@@ -197,7 +264,18 @@ export default function App() {
     promise: Promise<SearchResponse>;
   } | null>(null);
 
+  const isDark = userSettings.themeVariant !== 'light';
+  const hapticsEnabled = userSettings.hapticsEnabled;
+  const gridDensity = userSettings.gridDensity;
   const isShowingFavorites = activeTab === 'favorites';
+
+  const handleUpdateSettings = useCallback((patch: Partial<UserSettings>) => {
+    setUserSettings((prev) => {
+      const next = { ...prev, ...patch };
+      saveUserSettings(next);
+      return next;
+    });
+  }, []);
 
   // Sync Tailwind .dark class on <html>
   useEffect(() => {
@@ -217,16 +295,42 @@ export default function App() {
   }, []);
 
   const favoriteIds = useMemo(() => new Set(favorites.map((p) => p.id)), [favorites]);
+  const downloadedIds = useMemo(
+    () => new Set(downloadHistory.map((d) => d.pinId)),
+    [downloadHistory]
+  );
 
   const activeFilterCount = useMemo(() => {
     let count = 0;
-    if (sortBy !== 'vertical-first') count++;
+    if (sortBy !== 'popular') count++;
     if (aspectFilter !== 'all') count++;
+    if (resolutionFilter !== 'all') count++;
     if (colorPaletteFilter !== null) count++;
     if (hdOnly) count++;
     if (isSelectMode) count++;
     return count;
-  }, [sortBy, aspectFilter, colorPaletteFilter, hdOnly, isSelectMode]);
+  }, [sortBy, aspectFilter, resolutionFilter, colorPaletteFilter, hdOnly, isSelectMode]);
+
+  const handleCycleGridDensity = useCallback(() => {
+    if (hapticsEnabled) triggerHaptic(20);
+    const nextDensity: GridDensity =
+      gridDensity === 'standard'
+        ? 'compact'
+        : gridDensity === 'compact'
+        ? 'ultra'
+        : 'standard';
+    handleUpdateSettings({ gridDensity: nextDensity });
+  }, [hapticsEnabled, gridDensity, handleUpdateSettings]);
+
+  const galleryGridClasses = useMemo(() => {
+    if (gridDensity === 'ultra') {
+      return 'grid w-full grid-cols-4 gap-2 sm:grid-cols-5 sm:gap-2.5 md:grid-cols-6 xl:grid-cols-7';
+    }
+    if (gridDensity === 'compact') {
+      return 'grid w-full grid-cols-3 gap-2.5 sm:grid-cols-4 sm:gap-3 md:grid-cols-5 xl:grid-cols-6';
+    }
+    return 'grid w-full grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 xl:grid-cols-4';
+  }, [gridDensity]);
 
   const handleToggleFavorite = useCallback(
     (pin: PinItem) => {
@@ -237,28 +341,29 @@ export default function App() {
     [hapticsEnabled]
   );
 
-  const handleApplyWallpaper = useCallback(
+  const showToast = useCallback((msg: string) => {
+    setAppliedToastMessage(msg);
+    window.setTimeout(() => {
+      setAppliedToastMessage(null);
+    }, 3400);
+  }, []);
+
+  const handleOpenInStudio = useCallback(
     (pin: PinItem) => {
-      if (hapticsEnabled) triggerHaptic(50);
-      setRecentlyAppliedPinId(pin.id);
-      setAppliedToastMessage(`Wallpaper Applied Successfully (${pin.width}×${pin.height})`);
+      if (hapticsEnabled) triggerHaptic(25);
+      setStudioActivePin(pin);
+      setRecentlyViewed(recordRecentlyViewedPin(pin));
       setLightboxPinId(null);
-      window.setTimeout(() => {
-        setRecentlyAppliedPinId(null);
-      }, 2800);
-      window.setTimeout(() => {
-        setAppliedToastMessage(null);
-      }, 3200);
+      setActiveTab('studio');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
     },
     [hapticsEnabled]
   );
 
-  // SessionStorage scroll persistence when switching between explore and favorites/categories
   const handleSelectTab = useCallback(
     (tab: AppTab) => {
       if (hapticsEnabled) triggerHaptic(20);
 
-      // If leaving explore, save scroll position
       if (activeTab === 'explore' && tab !== 'explore') {
         try {
           sessionStorage.setItem(EXPLORE_SCROLL_KEY, String(window.scrollY));
@@ -267,12 +372,20 @@ export default function App() {
         }
       }
 
+      if (
+        tab === 'categories' &&
+        activeTab === 'categories' &&
+        (openedPack !== null || openedCustomCollectionId !== null)
+      ) {
+        setOpenedPack(null);
+        setOpenedCustomCollectionId(null);
+      }
+
       setActiveTab(tab);
       setSelectedIds(new Set());
       setActiveTag(null);
 
       if (tab === 'explore') {
-        // Restore scroll position after render
         window.setTimeout(() => {
           try {
             const savedPos = sessionStorage.getItem(EXPLORE_SCROLL_KEY);
@@ -283,10 +396,16 @@ export default function App() {
             // ignore
           }
         }, 50);
+      } else {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
       }
     },
-    [activeTab, hapticsEnabled]
+    [activeTab, hapticsEnabled, openedPack, openedCustomCollectionId]
   );
+
+  const handlePackPinsLoaded = useCallback((pins: PinItem[]) => {
+    setOpenedPackPins(pins);
+  }, []);
 
   const triggerBackgroundPrefetch = useCallback(
     (
@@ -333,7 +452,7 @@ export default function App() {
   );
 
   const runSearch = useCallback(
-    async (queryToRun: string) => {
+    async (queryToRun: string, forceRefresh = false) => {
       const trimmed = queryToRun.trim();
       if (!trimmed) return;
 
@@ -343,7 +462,11 @@ export default function App() {
       prefetchedBatchRef.current = null;
       prefetchPromiseRef.current = null;
 
-      setActiveTab((prev) => (prev === 'favorites' || prev === 'categories' ? 'explore' : prev));
+      setActiveTab((prev) =>
+        prev === 'favorites' || prev === 'categories' || prev === 'studio'
+          ? 'explore'
+          : prev
+      );
       setIsLoading(true);
       setSearchProgress({ loaded: 0, target: 100, page: 1 });
       setIsPrefetching(false);
@@ -354,15 +477,27 @@ export default function App() {
       setSelectedIds(new Set());
       setHighlightedIndex(0);
       setLightboxPinId(null);
+      setLightboxInitialFullscreen(false);
       setNextCursor(null);
       setHasMore(false);
 
       try {
         const response = await searchPins(trimmed, {
           targetLimit: 100,
+          forceRefresh,
           onProgress: (progress) => {
             if (searchGenerationRef.current === generation) {
               setSearchProgress(progress);
+            }
+          },
+          onBatch: (batchPins, batchMeta) => {
+            if (searchGenerationRef.current !== generation) return;
+            if (batchPins.length > 0) {
+              setRawPins(hydratePinsWithCachedTags(batchPins));
+              if (batchMeta) {
+                setSearchMeta(batchMeta);
+              }
+              setIsLoading(false);
             }
           },
         });
@@ -402,6 +537,7 @@ export default function App() {
     if (
       isShowingFavorites ||
       activeTab === 'categories' ||
+      activeTab === 'studio' ||
       !hasMore ||
       !nextCursor ||
       isLoadingMore ||
@@ -485,15 +621,16 @@ export default function App() {
   ]);
 
   useEffect(() => {
-    runSearch(DEFAULT_QUERY);
+    void runSearch(DEFAULT_QUERY);
   }, [runSearch]);
 
-  // Auto-load additional Pinterest matches seamlessly before reaching bottom
+  // Auto-load additional matches seamlessly before reaching bottom
   useEffect(() => {
     const sentinel = loadMoreSentinelRef.current;
     if (
       isShowingFavorites ||
       activeTab === 'categories' ||
+      activeTab === 'studio' ||
       !sentinel ||
       !hasMore ||
       isLoading ||
@@ -514,12 +651,19 @@ export default function App() {
 
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [isShowingFavorites, activeTab, hasMore, isLoading, isLoadingMore, isOnline, loadMorePins]);
+  }, [
+    isShowingFavorites,
+    activeTab,
+    hasMore,
+    isLoading,
+    isLoadingMore,
+    isOnline,
+    loadMorePins,
+  ]);
 
-  // Progressive ML image tagging for loaded remote pins
+  // Progressive ML image tagging for loaded remote pins (feeds clickable hashtags in Wallpaper Preview Modal)
   useEffect(() => {
     if (isLoading || !isOnline || mode === 'preview' || rawPins.length === 0) {
-      setIsTagging(false);
       return;
     }
 
@@ -533,7 +677,6 @@ export default function App() {
 
     const controller = new AbortController();
     const generation = searchGenerationRef.current;
-    setIsTagging(true);
 
     void generateTagsForPins(
       targets,
@@ -546,31 +689,12 @@ export default function App() {
         );
       },
       controller.signal
-    ).finally(() => {
-      if (searchGenerationRef.current === generation && !controller.signal.aborted) {
-        setIsTagging(false);
-      }
-    });
+    );
 
     return () => controller.abort();
   }, [rawPins, isLoading, isOnline, mode, activeQuery]);
 
   const activeSourcePins = isShowingFavorites ? favorites : rawPins;
-
-  const availableTags = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const pin of activeSourcePins) {
-      if (!pin.tags) continue;
-      for (const rawTag of pin.tags) {
-        const clean = rawTag.trim().toLowerCase();
-        if (!clean) continue;
-        counts.set(clean, (counts.get(clean) ?? 0) + 1);
-      }
-    }
-    return Array.from(counts.entries())
-      .map(([tag, count]) => ({ tag, count }))
-      .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
-  }, [activeSourcePins]);
 
   const handleToggleTag = useCallback(
     (tag: string | null) => {
@@ -591,6 +715,12 @@ export default function App() {
 
     if (aspectFilter !== 'all') {
       list = list.filter((p) => matchesAspectFilter(p.width, p.height, aspectFilter));
+    }
+
+    if (resolutionFilter !== 'all') {
+      list = list.filter((p) =>
+        matchesResolutionFilter(p.width, p.height, resolutionFilter)
+      );
     }
 
     if (colorPaletteFilter !== null) {
@@ -614,10 +744,24 @@ export default function App() {
         const bDiff = Math.abs(b.width / b.height - 9 / 16);
         return aDiff - bDiff;
       });
+    } else if (sortBy === 'popular') {
+      list.sort((a, b) => {
+        const aScore = (a.isHdOriginal ? 2 : 0) + (a.height > a.width ? 1 : 0);
+        const bScore = (b.isHdOriginal ? 2 : 0) + (b.height > b.width ? 1 : 0);
+        return bScore - aScore;
+      });
     }
 
     return list;
-  }, [activeSourcePins, aspectFilter, colorPaletteFilter, hdOnly, activeTag, sortBy]);
+  }, [
+    activeSourcePins,
+    aspectFilter,
+    resolutionFilter,
+    colorPaletteFilter,
+    hdOnly,
+    activeTag,
+    sortBy,
+  ]);
 
   // Keep highlighted index bounded when filters change
   useEffect(() => {
@@ -628,12 +772,23 @@ export default function App() {
     }
   }, [visiblePins.length, highlightedIndex]);
 
+  const lightboxPool = useMemo(() => {
+    if (
+      activeTab === 'categories' &&
+      (openedPack || openedCustomCollectionId) &&
+      openedPackPins.length > 0
+    ) {
+      return openedPackPins;
+    }
+    return visiblePins;
+  }, [activeTab, openedPack, openedCustomCollectionId, openedPackPins, visiblePins]);
+
   const lightboxIndex = useMemo(() => {
     if (!lightboxPinId) return -1;
-    return visiblePins.findIndex((p) => p.id === lightboxPinId);
-  }, [lightboxPinId, visiblePins]);
+    return lightboxPool.findIndex((p) => p.id === lightboxPinId);
+  }, [lightboxPinId, lightboxPool]);
 
-  const lightboxPin = lightboxIndex >= 0 ? visiblePins[lightboxIndex] : null;
+  const lightboxPin = lightboxIndex >= 0 ? lightboxPool[lightboxIndex] : null;
 
   const toggleSelectPin = useCallback(
     (id: string) => {
@@ -652,7 +807,7 @@ export default function App() {
   );
 
   const handleDimensionsLoaded = useCallback((id: string, width: number, height: number) => {
-    setRawPins((prev) => {
+    const patchList = (prev: PinItem[]) => {
       const target = prev.find((p) => p.id === id);
       if (!target || (target.width === width && target.height === height)) {
         return prev;
@@ -667,7 +822,9 @@ export default function App() {
             }
           : p
       );
-    });
+    };
+    setRawPins(patchList);
+    setOpenedPackPins(patchList);
   }, []);
 
   const handleSelectTop10 = useCallback(() => {
@@ -687,14 +844,16 @@ export default function App() {
   }, [hapticsEnabled]);
 
   const handleSingleDownload = useCallback(
-    async (pin: PinItem, index: number) => {
+    async (pin: PinItem, index: number, dimPercent = 0) => {
       if (hapticsEnabled) triggerHaptic(40);
       await downloadSinglePin(
         pin,
         index,
         isShowingFavorites ? 'saved-wallpapers' : activeQuery,
-        mode
+        mode,
+        dimPercent
       );
+      setDownloadHistory(getDownloadHistory());
     },
     [activeQuery, hapticsEnabled, isShowingFavorites, mode]
   );
@@ -709,9 +868,79 @@ export default function App() {
         mode,
         dimPercent
       );
+      setDownloadHistory(getDownloadHistory());
     },
     [activeQuery, hapticsEnabled, isShowingFavorites, mode]
   );
+
+  const handleApplyWallpaper = useCallback(
+    (pin: PinItem, dimPercent = 0) => {
+      if (hapticsEnabled) triggerHaptic(50);
+      void downloadSinglePin(pin, 0, activeQuery, mode, dimPercent).then(() => {
+        setDownloadHistory(getDownloadHistory());
+      });
+      setRecentlyAppliedPinId(pin.id);
+      showToast(
+        `Saved ${pin.width}×${pin.height} file to device${
+          dimPercent > 0 ? ` (${dimPercent}% OLED dim)` : ''
+        } — ready to set in OS settings.`
+      );
+      setLightboxPinId(null);
+      setLightboxInitialFullscreen(false);
+      window.setTimeout(() => {
+        setRecentlyAppliedPinId(null);
+      }, 2800);
+    },
+    [activeQuery, hapticsEnabled, mode, showToast]
+  );
+
+  const handleFindSimilar = useCallback(
+    async (pin: PinItem) => {
+      if (hapticsEnabled) triggerHaptic(30);
+      const tagSeed = pin.tags && pin.tags.length > 0 ? pin.tags.slice(0, 3).join(' ') : '';
+      const fallbackQuery = `${pin.title} ${tagSeed} Phone Wallpaper 4K`.trim();
+      void runSearch(fallbackQuery);
+    },
+    [hapticsEnabled, runSearch]
+  );
+
+  const handleVisualFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setVisualError(null);
+    setVisualResult(null);
+    setIsAnalyzingVisual(true);
+
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const dataUrl = String(reader.result || '');
+      setVisualPreviewDataUrl(dataUrl);
+      try {
+        const res = await fetch('/api/ai-vision', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            mode: 'visual-search',
+            mimeType: file.type || 'image/jpeg',
+            base64Data: dataUrl,
+          }),
+        });
+        const data = (await res.json()) as VisualAnalysisResult & { error?: string };
+        if (!res.ok || data.error) {
+          throw new Error(data.error || 'Visual AI analysis failed');
+        }
+        setVisualResult(data);
+      } catch (err) {
+        setVisualError(
+          err instanceof Error ? err.message : 'Unable to analyze uploaded image.'
+        );
+      } finally {
+        setIsAnalyzingVisual(false);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
 
   const handleBatchDownloadZip = useCallback(async () => {
     const selectedPins = visiblePins.filter((p) => selectedIds.has(p.id));
@@ -734,6 +963,7 @@ export default function App() {
           setZipProgress({ completed, total });
         }
       );
+      setDownloadHistory(getDownloadHistory());
     } finally {
       setIsBundling(false);
       setZipProgress(null);
@@ -764,6 +994,7 @@ export default function App() {
         if (lightboxPinId) {
           e.preventDefault();
           setLightboxPinId(null);
+          setLightboxInitialFullscreen(false);
         } else if (isTyping && target === searchInputRef.current) {
           searchInputRef.current?.blur();
         }
@@ -805,9 +1036,25 @@ export default function App() {
         e.preventDefault();
         if (lightboxPinId) {
           setLightboxPinId(null);
+          setLightboxInitialFullscreen(false);
         } else {
           const targetPin = visiblePins[highlightedIndex] || visiblePins[0];
-          if (targetPin) setLightboxPinId(targetPin.id);
+          if (targetPin) {
+            setLightboxInitialFullscreen(false);
+            setLightboxPinId(targetPin.id);
+            setRecentlyViewed(recordRecentlyViewedPin(targetPin));
+          }
+        }
+        return;
+      }
+
+      if (e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        const targetPin = lightboxPin || visiblePins[highlightedIndex] || visiblePins[0];
+        if (targetPin) {
+          setLightboxInitialFullscreen(true);
+          setLightboxPinId(targetPin.id);
+          setRecentlyViewed(recordRecentlyViewedPin(targetPin));
         }
         return;
       }
@@ -841,41 +1088,49 @@ export default function App() {
     handleSingleDownload,
   ]);
 
+  const rootBgClass =
+    userSettings.themeVariant === 'light'
+      ? 'bg-[#F6F7F9] text-[#111827]'
+      : userSettings.themeVariant === 'dark-slate'
+      ? 'bg-[#101010] text-[#F9FAFB]'
+      : 'bg-[#050505] text-[#F9FAFB]';
+
   return (
-    <div
-      id="top"
-      className="min-h-screen bg-[#F6F7F9] text-[#111827] dark:bg-[#0B0D10] dark:text-[#F3F4F6]"
-    >
+    <div id="top" className={`min-h-screen w-full max-w-full overflow-x-clip ${rootBgClass}`}>
       <TopCommandBar
         activeTab={activeTab}
         isShowingFavorites={isShowingFavorites}
         inputValue={inputValue}
         onInputChange={setInputValue}
-        onSearchSubmit={(overrideQuery) => runSearch(overrideQuery ?? inputValue)}
+        onSearchSubmit={(overrideQuery) => void runSearch(overrideQuery ?? inputValue)}
         activeQuery={activeQuery}
         mode={mode}
         isOnline={isOnline}
         isLoading={isLoading}
         isDark={isDark}
-        onToggleTheme={() => setIsDark((d) => !d)}
-        hapticsEnabled={hapticsEnabled}
-        onToggleHaptics={() => {
-          if (!hapticsEnabled) triggerHaptic(40);
-          setHapticsEnabled((prev) => !prev);
-        }}
+        onToggleTheme={() =>
+          handleUpdateSettings({
+            themeVariant: isDark ? 'light' : 'amoled',
+          })
+        }
+        gridDensity={gridDensity}
+        onCycleGridDensity={handleCycleGridDensity}
         searchInputRef={searchInputRef}
         recentSearches={recentSearches}
         onRemoveRecentSearch={(q) => setRecentSearches(removeRecentSearch(q))}
         onClearRecentSearches={() => setRecentSearches(clearRecentSearches())}
-        favoritesCount={favorites.length}
-        onToggleShowFavorites={() => {
-          handleSelectTab(isShowingFavorites ? 'explore' : 'favorites');
-        }}
         onOpenFiltersModal={() => setIsFiltersModalOpen(true)}
+        onOpenVisualSearch={() => setIsVisualSearchOpen(true)}
+        onOpenSettings={() => setIsSettingsModalOpen(true)}
         activeFilterCount={activeFilterCount}
+        showGridToggle={
+          activeTab !== 'categories' ||
+          openedPack !== null ||
+          openedCustomCollectionId !== null
+        }
       />
 
-      {/* Filters & Sort Bottom Sheet Modal */}
+      {/* Filters, Resolution, Grid Density & Sort Modal */}
       <FilterModal
         isOpen={isFiltersModalOpen}
         onClose={() => setIsFiltersModalOpen(false)}
@@ -883,12 +1138,21 @@ export default function App() {
         onSortChange={setSortBy}
         aspectFilter={aspectFilter}
         onAspectChange={setAspectFilter}
+        resolutionFilter={resolutionFilter}
+        onResolutionFilterChange={setResolutionFilter}
         colorPaletteFilter={colorPaletteFilter}
         onColorPaletteChange={setColorPaletteFilter}
+        gridDensity={gridDensity}
+        onGridDensityChange={(density) => handleUpdateSettings({ gridDensity: density })}
         hdOnly={hdOnly}
         onToggleHdOnly={() => setHdOnly((prev) => !prev)}
         isSelectMode={isSelectMode}
         onToggleSelectMode={() => setIsSelectMode((prev) => !prev)}
+        hapticsEnabled={hapticsEnabled}
+        onToggleHaptics={() => {
+          if (!hapticsEnabled) triggerHaptic(40);
+          handleUpdateSettings({ hapticsEnabled: !hapticsEnabled });
+        }}
         totalCount={visiblePins.length}
         onSelectTop10={handleSelectTop10}
         onSelectAll={handleSelectAll}
@@ -896,7 +1160,160 @@ export default function App() {
         selectedCount={selectedIds.size}
       />
 
-      {/* Applied Wallpaper Toast Notification */}
+      {/* Settings & Personalization Modal */}
+      <SettingsModal
+        isOpen={isSettingsModalOpen}
+        onClose={() => setIsSettingsModalOpen(false)}
+        settings={userSettings}
+        onUpdateSettings={handleUpdateSettings}
+        onClearSearchCache={() => {
+          clearSearchCacheOnly();
+          showToast('Search cache cleared while keeping your Saved Vault intact.');
+        }}
+        onClearSearchHistory={() => {
+          setRecentSearches(clearRecentSearches());
+          showToast('Recent search history cleared.');
+        }}
+        onClearDownloadHistory={() => {
+          setDownloadHistory(clearDownloadHistory());
+          showToast('Download log cleared.');
+        }}
+        onClearRecentlyViewed={() => {
+          setRecentlyViewed(clearRecentlyViewedPins());
+          showToast('Recently viewed history cleared.');
+        }}
+      />
+
+      {/* Visual AI Search Modal (Upload an Image to Find Matching Wallpapers) */}
+      {isVisualSearchOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4"
+          onClick={() => setIsVisualSearchOpen(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-lg rounded-3xl border border-white/10 bg-[#101010] p-5 text-white shadow-2xl space-y-4"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#D91B42]/15 text-[#D91B42]">
+                  <Camera className="h-4.5 w-4.5" />
+                </span>
+                <div>
+                  <h2 className="text-base font-bold">Gemini Visual AI Wallpaper Search</h2>
+                  <p className="text-[11px] text-zinc-400">
+                    Upload any screenshot or photo to extract palette, mood &amp; matching 4K queries
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsVisualSearchOpen(false)}
+                className="flex h-8 w-8 items-center justify-center rounded-full bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-white"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <input
+              ref={visualFileInputRef}
+              type="file"
+              accept="image/*"
+              onChange={handleVisualFileSelect}
+              className="hidden"
+            />
+
+            <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-white/15 bg-[#171717] p-5 text-center">
+              {visualPreviewDataUrl ? (
+                <img
+                  src={visualPreviewDataUrl}
+                  alt="Uploaded reference"
+                  className="max-h-44 rounded-xl object-contain mb-3 border border-white/10"
+                />
+              ) : (
+                <Upload className="h-8 w-8 text-[#D91B42] mb-2" />
+              )}
+              <button
+                type="button"
+                onClick={() => visualFileInputRef.current?.click()}
+                className="rounded-xl bg-[#D91B42] px-4 py-2 text-xs font-bold text-white shadow-lg shadow-[#D91B42]/25 hover:bg-[#e0244a]"
+              >
+                {visualPreviewDataUrl ? 'Choose Another Image' : 'Upload Reference Image'}
+              </button>
+            </div>
+
+            {isAnalyzingVisual && (
+              <div className="flex items-center justify-center gap-2 py-4 text-xs font-semibold text-zinc-300">
+                <Loader2 className="h-4 w-4 animate-spin text-[#D91B42]" />
+                <span>Analyzing subject, lighting &amp; dominant colors…</span>
+              </div>
+            )}
+
+            {visualError && (
+              <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300">
+                {visualError}
+              </div>
+            )}
+
+            {visualResult && (
+              <div className="space-y-3 rounded-2xl border border-white/10 bg-[#171717] p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-white">
+                    {visualResult.subject}
+                  </span>
+                  <span className="rounded-lg bg-[#D91B42]/20 px-2 py-0.5 text-[10px] font-bold text-[#D91B42]">
+                    {visualResult.category}
+                  </span>
+                </div>
+                <p className="text-xs text-zinc-400">{visualResult.moodDescription}</p>
+
+                {/* Dominant Colors */}
+                {visualResult.dominantColors?.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] text-zinc-400">Palette:</span>
+                    {visualResult.dominantColors.map((hex) => (
+                      <span
+                        key={hex}
+                        className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-black/50 px-2 py-0.5 font-mono text-[10px]"
+                      >
+                        <span
+                          className="h-2.5 w-2.5 rounded-full"
+                          style={{ backgroundColor: hex }}
+                        />
+                        {hex}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {/* Recommended Search Queries */}
+                <div className="space-y-1.5 pt-1">
+                  <span className="text-[11px] font-semibold text-zinc-300">
+                    Tap a matching wallpaper search:
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {visualResult.recommendedQueries.map((q) => (
+                      <button
+                        key={q}
+                        type="button"
+                        onClick={() => {
+                          setIsVisualSearchOpen(false);
+                          void runSearch(q);
+                        }}
+                        className="rounded-xl bg-[#D91B42] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#e0244a]"
+                      >
+                        {q} →
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Toast Notification */}
       <AnimatePresence>
         {appliedToastMessage && (
           <motion.div
@@ -912,182 +1329,201 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      <main className="pb-36 pt-4">
-        {activeTab === 'categories' ? (
-          /* Curated Mobile Wallpaper Categories Tab View (2-column compact grid, 16px outer padding) */
-          <section
-            aria-label="Wallpaper Category Packs"
-            className="mx-auto max-w-[1440px] px-4 pb-8 sm:px-6 lg:px-8"
-          >
-            <div className="mb-5 flex flex-wrap items-end justify-between gap-4">
-              <div>
-                <div className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-[#E60023] dark:text-[#FF4D67]">
-                  <ImageIcon className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Curated Collections</span>
-                </div>
-                <h1 className="mt-1 font-display text-xl font-bold tracking-tight text-[#111827] dark:text-[#F3F4F6] sm:text-2xl">
-                  4K Mobile Wallpaper Packs
-                </h1>
-                <p className="mt-1 text-xs sm:text-sm text-[#6B7280] dark:text-[#9CA3AF]">
-                  Tap any collection to fetch full-resolution 9:16 vertical lockscreens and AMOLED backgrounds.
-                </p>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
-              {WALLPAPER_CATEGORY_PACKS.map((pack) => {
-                const isCurrentPack =
-                  activeQuery.toLowerCase() === pack.query.toLowerCase();
-                return (
-                  <button
-                    key={pack.id}
-                    type="button"
-                    onClick={() => {
-                      setInputValue(pack.query);
-                      void runSearch(pack.query);
-                    }}
-                    className={`group relative flex h-36 flex-col justify-between overflow-hidden rounded-2xl border p-3.5 text-left transition-all duration-200 hover:-translate-y-0.5 hover:shadow-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E60023] ${
-                      isCurrentPack
-                        ? 'border-[#E60023] ring-2 ring-[#E60023]/60'
-                        : 'border-white/10 hover:border-white/25'
-                    } bg-gradient-to-br ${pack.gradient} text-white`}
-                  >
-                    <div className="flex items-center justify-between gap-1">
-                      <span className="inline-flex items-center gap-1 rounded-md border border-white/15 bg-black/40 px-2 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-wider text-white/90 backdrop-blur-md">
-                        <Sparkles className="h-2 w-2 text-[#FF4D67]" aria-hidden="true" />
-                        <span>{pack.badge}</span>
-                      </span>
-                      <span className="flex h-6 w-6 items-center justify-center rounded-lg border border-white/15 bg-black/35 text-white/85 transition-transform duration-150 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:bg-[#E60023]">
-                        <ArrowUpRight className="h-3 w-3" aria-hidden="true" />
-                      </span>
-                    </div>
-
-                    <div>
-                      <h2 className="font-display text-sm font-bold tracking-tight text-white line-clamp-1">
-                        {pack.title}
-                      </h2>
-                      <p className="mt-0.5 line-clamp-2 text-[10px] leading-snug text-white/75">
-                        {pack.subtitle}
-                      </p>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </section>
+      <main className="w-full max-w-full pb-36 pt-3 sm:pt-4">
+        {activeTab === 'studio' ? (
+          /* TAB 4: WALLPAPER STUDIO IMAGE EDITOR */
+          <div className="mx-auto w-full max-w-[1440px] px-4 pb-10 sm:px-6 lg:px-8">
+            <WallpaperStudioEditor
+              activePin={studioActivePin || visiblePins[0] || favorites[0] || null}
+              availablePins={visiblePins.length > 0 ? visiblePins.slice(0, 24) : favorites}
+              onSelectPinForStudio={(pin) => setStudioActivePin(pin)}
+            />
+          </div>
+        ) : activeTab === 'favorites' ? (
+          /* TAB 5: SMART LIBRARY & COLLECTIONS */
+          <SmartLibraryView
+            favoritePins={favorites}
+            collections={collections}
+            recentlyViewed={recentlyViewed}
+            downloadHistory={downloadHistory}
+            selectedIds={selectedIds}
+            favoriteIds={favoriteIds}
+            downloadedIds={downloadedIds}
+            isSelectMode={isSelectMode}
+            lockscreenSim={lockscreenSim}
+            gridDensity={gridDensity}
+            activeTag={activeTag}
+            onSelectTag={handleToggleTag}
+            onToggleSelect={toggleSelectPin}
+            onToggleFavorite={handleToggleFavorite}
+            onRemoveDuplicateFavorites={(idsToRemove) => {
+              setFavorites(removeFavoritePinIds(idsToRemove));
+              showToast(`Removed ${idsToRemove.size} duplicate wallpaper(s).`);
+            }}
+            onOpenLightbox={(p, openInFullscreen = false) => {
+              setLightboxInitialFullscreen(Boolean(openInFullscreen));
+              setLightboxPinId(p.id);
+              setRecentlyViewed(recordRecentlyViewedPin(p));
+            }}
+            onDownloadSingle={handleSingleDownload}
+            onOpenInStudio={handleOpenInStudio}
+            onCreateCollection={(name, desc) => {
+              setCollections(createSmartCollection(name, desc));
+              showToast(`Collection "${name}" created.`);
+            }}
+            onRenameCollection={(id, name) => {
+              setCollections(renameSmartCollection(id, name));
+            }}
+            onDeleteCollection={(id) => {
+              setCollections(deleteSmartCollection(id));
+            }}
+            onTogglePinInCollection={(colId, pin) => {
+              setCollections(togglePinInSmartCollection(colId, pin));
+              setFavorites(getFavoritePins());
+            }}
+            onUpdatePinNote={(pinId, note) => {
+              setFavorites(updateFavoritePinNote(pinId, note));
+              showToast('Wallpaper note saved.');
+            }}
+            onClearRecentlyViewed={() => setRecentlyViewed(clearRecentlyViewedPins())}
+            onClearDownloadHistory={() => setDownloadHistory(clearDownloadHistory())}
+            onNavigateExplore={() => handleSelectTab('explore')}
+          />
+        ) : activeTab === 'categories' ? (
+          /* TAB 2: WALLPAPERS (24 Curated Collections + User Custom Collections) */
+          <CollectionsView
+            openedPack={openedPack}
+            onOpenPack={(pack) => {
+              setOpenedPack(pack);
+              if (!pack && !openedCustomCollectionId) {
+                setOpenedPackPins([]);
+              }
+            }}
+            openedCustomCollectionId={openedCustomCollectionId}
+            onOpenCustomCollection={(colId) => {
+              setOpenedCustomCollectionId(colId);
+              if (!colId && !openedPack) {
+                setOpenedPackPins([]);
+              }
+            }}
+            collections={collections}
+            favoritePins={favorites}
+            recentlyViewed={recentlyViewed}
+            packPins={openedPackPins}
+            onPackPinsLoaded={handlePackPinsLoaded}
+            gridDensity={gridDensity}
+            onSetGridDensity={(density) => handleUpdateSettings({ gridDensity: density })}
+            favoriteIds={favoriteIds}
+            downloadedIds={downloadedIds}
+            selectedIds={selectedIds}
+            lockscreenSim={lockscreenSim}
+            hapticsEnabled={hapticsEnabled}
+            onToggleFavorite={handleToggleFavorite}
+            onToggleSelect={toggleSelectPin}
+            onOpenLightbox={(p, openInFullscreen = false) => {
+              setLightboxInitialFullscreen(Boolean(openInFullscreen));
+              setLightboxPinId(p.id);
+              setRecentlyViewed(recordRecentlyViewedPin(p));
+            }}
+            onDimensionsLoaded={handleDimensionsLoaded}
+            onShowToast={(msg) => {
+              setDownloadHistory(getDownloadHistory());
+              showToast(msg);
+            }}
+            onCreateCollection={(name, desc, options) => {
+              const updated = createSmartCollection(name, desc, options);
+              setCollections(updated);
+              setFavorites(getFavoritePins());
+              return updated;
+            }}
+            onRenameCollection={(id, name) => {
+              setCollections(renameSmartCollection(id, name));
+            }}
+            onDeleteCollection={(id) => {
+              setCollections(deleteSmartCollection(id));
+            }}
+            onTogglePinInCollection={(colId, pin) => {
+              setCollections(togglePinInSmartCollection(colId, pin));
+              setFavorites(getFavoritePins());
+            }}
+            onAddPinsToCollection={(colId, pins) => {
+              const updated = addPinsToSmartCollection(colId, pins);
+              setCollections(updated);
+              setFavorites(getFavoritePins());
+              return updated;
+            }}
+          />
         ) : (
+          /* TAB 1: DISCOVER */
           <>
-            {activeTab === 'explore' && !isShowingFavorites && (
+            {activeTab === 'explore' && (
               <FeaturedTodaySection
                 activeQuery={activeQuery}
                 onSelectTrendQuery={(trendQuery) => {
-                  setInputValue(trendQuery);
+                  setInputValue('');
                   void runSearch(trendQuery);
                 }}
               />
             )}
 
-            {/* Visual Tags Single-Row Horizontally Scrollable Pill Strip right above wallpaper grid */}
-            {!isShowingFavorites && availableTags.length > 0 && (
-              <div className="mx-auto max-w-[1440px] px-4 sm:px-6 lg:px-8 pt-3 pb-2">
-                <div
-                  className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none no-scrollbar [-webkit-overflow-scrolling:touch]"
-                  role="group"
-                  aria-label="Filter by AI visual tags"
-                >
-                  <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[#6B7280] dark:text-[#9CA3AF] whitespace-nowrap shrink-0">
-                    <Tag className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>Tags:</span>
-                  </span>
-
-                  <button
-                    type="button"
-                    onClick={() => handleToggleTag(null)}
-                    className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
-                      activeTag === null
-                        ? 'border-[#111827] bg-[#111827] text-white dark:border-[#F3F4F6] dark:bg-[#F3F4F6] dark:text-[#0B0D10]'
-                        : 'border-[#E5E7EB] bg-white text-[#4B5563] hover:text-[#111827] dark:border-[#1E222B] dark:bg-[#14171D] dark:text-[#9CA3AF] dark:hover:text-[#F3F4F6]'
-                    }`}
-                  >
-                    All Tags
-                  </button>
-
-                  {availableTags.slice(0, 16).map(({ tag, count }) => {
-                    const isActive = activeTag?.toLowerCase() === tag.toLowerCase();
-                    return (
-                      <button
-                        key={tag}
-                        type="button"
-                        onClick={() => handleToggleTag(isActive ? null : tag)}
-                        className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
-                          isActive
-                            ? 'border-[#E60023] bg-[#E60023]/10 text-[#E60023] dark:bg-[#E60023]/15 dark:text-[#FF4D67]'
-                            : 'border-[#E5E7EB] bg-white text-[#374151] hover:border-[#D1D5DB] hover:bg-[#F3F4F6] dark:border-[#1E222B] dark:bg-[#14171D] dark:text-[#D1D5DB] dark:hover:border-[#2E3442] dark:hover:bg-[#191E28]'
-                        }`}
-                      >
-                        <span>#{tag}</span>
-                        <span className="font-mono text-[10px] opacity-65 tabular-nums">({count})</span>
-                      </button>
-                    );
-                  })}
-
-                  {isTagging && (
-                    <span className="inline-flex items-center gap-1.5 text-[11px] text-[#6B7280] dark:text-[#9CA3AF] whitespace-nowrap shrink-0 pl-2">
-                      <Loader2 className="h-3 w-3 animate-spin text-[#E60023]" aria-hidden="true" />
-                      <span>Tagging…</span>
-                    </span>
-                  )}
-                </div>
-              </div>
-            )}
-
-            <div className="mx-auto max-w-[1440px] px-4 pt-2 sm:px-6 lg:px-8">
-              {/* Saved Wallpapers Vault Banner */}
-              {isShowingFavorites && (
-                <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[#E60023]/30 bg-[#E60023]/10 px-4 py-3 text-xs">
-                  <div className="flex items-center gap-2 font-medium text-[#111827] dark:text-[#F3F4F6]">
-                    <Heart
-                      className="h-4 w-4 fill-[#E60023] text-[#E60023]"
-                      aria-hidden="true"
-                    />
-                    <span>
-                      Saved Wallpapers Vault · {favorites.length}{' '}
-                      {favorites.length === 1 ? 'wallpaper' : 'wallpapers'} stored on device
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {favorites.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setFavorites(clearFavoritePins());
-                          setSelectedIds(new Set());
-                        }}
-                        className="inline-flex items-center gap-1 rounded-xl border border-[#E5E7EB] bg-white px-3 py-1.5 text-xs font-medium text-[#6B7280] transition-colors hover:text-[#E60023] dark:border-[#1E222B] dark:bg-[#14171D] dark:text-[#9CA3AF] dark:hover:text-[#FF4D67]"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span>Clear Vault</span>
-                      </button>
-                    )}
+            {/* Streamlined Gallery Header: "All Wallpapers" Left + "Sort: Popular" Dropdown Right */}
+            <div className="mx-auto w-full max-w-[1440px] px-4 pt-3 pb-2.5 sm:px-6 lg:px-8">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2">
+                  <h2 className="font-display text-base sm:text-lg font-bold tracking-tight text-[#111827] dark:text-white truncate">
+                    All Wallpapers
+                  </h2>
+                  {activeTag && (
                     <button
                       type="button"
-                      onClick={() => handleSelectTab('explore')}
-                      className="inline-flex items-center gap-1 rounded-xl bg-[#111827] px-3.5 py-1.5 text-xs font-semibold text-white dark:bg-[#F3F4F6] dark:text-[#0B0D10]"
+                      onClick={() => handleToggleTag(null)}
+                      title="Clear hashtag filter"
+                      className="inline-flex items-center gap-1 rounded-lg border border-[#D91B42]/40 bg-[#D91B42]/12 px-2 py-0.5 text-[11px] font-semibold text-[#D91B42] transition-colors hover:bg-[#D91B42]/20 shrink-0"
                     >
-                      <span>Back to Explore</span>
+                      <span>#{activeTag}</span>
+                      <X className="h-3 w-3" aria-hidden="true" />
                     </button>
-                  </div>
+                  )}
                 </div>
-              )}
 
-              {!isShowingFavorites && !isLoading && (cacheInfo.fromCache || !isOnline) && (
-                <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-xs text-amber-800 dark:text-amber-200">
+                <div className="relative shrink-0">
+                  <ArrowUpDown
+                    className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#D91B42]"
+                    aria-hidden="true"
+                  />
+                  <select
+                    aria-label="Sort wallpapers"
+                    value={sortBy}
+                    onChange={(e) => {
+                      if (hapticsEnabled) triggerHaptic(15);
+                      setSortBy(e.target.value as SortOption);
+                    }}
+                    className="h-9 cursor-pointer appearance-none rounded-[11px] border border-slate-200/90 bg-white pl-8 pr-7 text-xs font-semibold text-slate-800 shadow-xs transition-colors hover:border-[#D91B42]/50 focus:border-[#D91B42] focus:outline-none focus:ring-2 focus:ring-[#D91B42]/20 dark:border-white/[0.08] dark:bg-[#171717] dark:text-white"
+                  >
+                    <option value="popular">Sort: Popular</option>
+                    <option value="vertical-first">Sort: 9:16 Vertical</option>
+                    <option value="highest-res">Sort: Highest 4K</option>
+                    <option value="best-match">Sort: Best Match</option>
+                  </select>
+                  <span
+                    aria-hidden="true"
+                    className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[9px] text-slate-400"
+                  >
+                    ▼
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="mx-auto w-full max-w-[1440px] px-4 pt-1 sm:px-6 lg:px-8">
+              {!isLoading && (cacheInfo.fromCache || !isOnline) && (
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-[18px] border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-xs text-amber-800 dark:text-amber-200">
                   <div className="flex items-center gap-2">
                     <Database className="h-4 w-4 shrink-0" aria-hidden="true" />
                     <span>
                       {!isOnline
                         ? 'You are currently offline.'
-                        : 'Pinterest API is temporarily unavailable.'}{' '}
+                        : 'Primary API is temporarily rate-limited.'}{' '}
                       Showing locally cached wallpapers
                       {cacheInfo.cachedAt
                         ? ` saved ${formatRelativeTime(cacheInfo.cachedAt)}`
@@ -1098,8 +1534,8 @@ export default function App() {
                   {isOnline && (
                     <button
                       type="button"
-                      onClick={() => runSearch(activeQuery)}
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-amber-500/40 bg-white/80 px-3 py-1 font-medium text-amber-900 transition-colors hover:bg-white dark:bg-[#14171D] dark:text-amber-200 dark:hover:bg-[#1E222B]"
+                      onClick={() => void runSearch(activeQuery, true)}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-amber-500/40 bg-white/80 px-3 py-1 font-semibold text-amber-900 transition-colors hover:bg-white dark:bg-[#171717] dark:text-amber-200"
                     >
                       <RefreshCw className="h-3 w-3" aria-hidden="true" />
                       <span>Retry Live</span>
@@ -1109,29 +1545,29 @@ export default function App() {
               )}
 
               {/* Loading Skeletons with Live Auto-Pagination Progress */}
-              {!isShowingFavorites && isLoading ? (
+              {isLoading ? (
                 <>
-                  <div className="mb-4 rounded-2xl border border-[#E5E7EB] bg-white px-4 py-3 dark:border-[#1E222B] dark:bg-[#14171D]">
+                  <div className="mb-4 rounded-[18px] border border-[#E5E7EB] bg-white px-4 py-3 dark:border-white/[0.08] dark:bg-[#171717]">
                     <div className="flex items-center justify-between gap-3 text-xs">
-                      <div className="flex items-center gap-2 font-medium text-[#111827] dark:text-[#F3F4F6]">
+                      <div className="flex min-w-0 items-center gap-2 font-semibold text-[#111827] dark:text-white">
                         <Loader2
-                          className="h-3.5 w-3.5 animate-spin text-[#E60023]"
+                          className="h-3.5 w-3.5 shrink-0 animate-spin text-[#D91B42]"
                           aria-hidden="true"
                         />
-                        <span>
-                          Fetching high-res wallpapers for “{activeQuery}”
+                        <span className="truncate">
+                          Fetching wallpapers for &ldquo;{activeQuery}&rdquo;
                           {searchProgress && searchProgress.page > 1
                             ? ` · Page ${searchProgress.page}`
                             : ''}
                         </span>
                       </div>
-                      <span className="font-mono text-[#6B7280] dark:text-[#9CA3AF] tabular-nums">
-                        {searchProgress?.loaded ?? 0} / ~{searchProgress?.target ?? 100} loaded
+                      <span className="shrink-0 font-mono text-[11px] text-[#6B7280] dark:text-[#9CA3AF] tabular-nums">
+                        {searchProgress?.loaded ?? 0} / ~{searchProgress?.target ?? 100}
                       </span>
                     </div>
-                    <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[#E5E7EB] dark:bg-[#0B0D10]">
+                    <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[#E5E7EB] dark:bg-[#050505]">
                       <div
-                        className="h-full bg-[#E60023] transition-all duration-200"
+                        className="h-full bg-[#D91B42] transition-all duration-200"
                         style={{
                           width: `${Math.min(
                             100,
@@ -1149,77 +1585,57 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="columns-2 gap-4 md:columns-3 xl:columns-4">
-                    {Array.from({ length: 12 }).map((_, i) => {
-                      const heights = [380, 320, 420, 340, 390, 310];
-                      return (
-                        <div
-                          key={i}
-                          className="mb-4 break-inside-avoid animate-pulse rounded-2xl border border-[#E5E7EB] bg-[#E5E7EB]/70 dark:border-[#1E222B] dark:bg-[#14171D]"
-                          style={{ height: `${heights[i % heights.length]}px` }}
-                        />
-                      );
-                    })}
+                  <div className={galleryGridClasses}>
+                    {Array.from({ length: 12 }).map((_, i) => (
+                      <div
+                        key={i}
+                        className="aspect-[9/16] w-full animate-pulse rounded-[18px] border border-[#E5E7EB] bg-[#E5E7EB]/70 dark:border-white/[0.08] dark:bg-[#171717]"
+                      />
+                    ))}
                   </div>
                 </>
               ) : visiblePins.length === 0 ? (
-                /* Empty Search, Vault, or Filter State */
-                <div className="flex flex-col items-center justify-center rounded-2xl border border-[#E5E7EB] bg-white px-6 py-16 text-center dark:border-[#1E222B] dark:bg-[#14171D]">
-                  <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-[#F3F4F6] text-[#6B7280] dark:bg-[#0B0D10] dark:text-[#9CA3AF]">
-                    {isShowingFavorites ? (
-                      <Heart className="h-6 w-6" aria-hidden="true" />
-                    ) : (
-                      <ImageIcon className="h-6 w-6" aria-hidden="true" />
-                    )}
+                /* Empty Search or Filter State */
+                <div className="flex flex-col items-center justify-center rounded-[20px] border border-[#E5E7EB] bg-white px-6 py-16 text-center dark:border-white/[0.08] dark:bg-[#171717]">
+                  <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[#F3F4F6] text-[#6B7280] dark:bg-[#050505] dark:text-[#9CA3AF]">
+                    <ImageIcon className="h-6 w-6" aria-hidden="true" />
                   </div>
-                  <h2 className="mt-4 font-display text-lg font-bold text-[#111827] dark:text-[#F3F4F6]">
-                    {isShowingFavorites && favorites.length === 0
-                      ? 'Your Saved Wallpaper Vault is empty'
-                      : activeSourcePins.length === 0
+                  <h2 className="mt-4 font-display text-lg font-bold text-[#111827] dark:text-white">
+                    {activeSourcePins.length === 0
                       ? `No wallpapers found for “${activeQuery}”`
                       : 'No wallpapers match the current filters'}
                   </h2>
-                  <p className="mt-1.5 max-w-md text-sm text-[#6B7280] dark:text-[#9CA3AF]">
-                    {isShowingFavorites && favorites.length === 0
-                      ? 'Tap the heart icon on any wallpaper card or inside the Phone Lockscreen Studio to build your personal wallpaper collection.'
-                      : activeSourcePins.length === 0
-                      ? 'Try another keyword in English or any local language, or browse the Categories tab below.'
-                      : `Try resetting your aspect ratio filter or disabling HD Originals Only to see all ${activeSourcePins.length} wallpapers.`}
+                  <p className="mt-1.5 max-w-md text-xs sm:text-sm text-[#6B7280] dark:text-[#9CA3AF]">
+                    {activeSourcePins.length === 0
+                      ? 'Try another keyword in English or any local language, or browse the Wallpapers tab below.'
+                      : `Try resetting your resolution or aspect ratio filter to see all ${activeSourcePins.length} wallpapers.`}
                   </p>
-                  {isShowingFavorites && favorites.length === 0 ? (
+                  {activeSourcePins.length > 0 && (
                     <button
                       type="button"
-                      onClick={() => handleSelectTab('explore')}
-                      className="mt-5 inline-flex items-center gap-2 rounded-xl bg-[#E60023] px-4 py-2.5 text-xs font-semibold text-white transition-colors hover:bg-[#CC001F]"
+                      onClick={() => {
+                        setAspectFilter('all');
+                        setResolutionFilter('all');
+                        setColorPaletteFilter(null);
+                        setHdOnly(false);
+                        setActiveTag(null);
+                      }}
+                      className="mt-5 inline-flex items-center gap-2 rounded-xl bg-[#D91B42] px-4 py-2.5 text-xs font-bold text-white shadow-[0_4px_14px_rgba(255,49,90,0.35)] transition-colors hover:bg-[#e0244a]"
                     >
-                      <span>Explore 4K Wallpapers</span>
+                      <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Reset Filters</span>
                     </button>
-                  ) : (
-                    activeSourcePins.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setAspectFilter('all');
-                          setColorPaletteFilter(null);
-                          setHdOnly(false);
-                          setActiveTag(null);
-                        }}
-                        className="mt-5 inline-flex items-center gap-2 rounded-xl bg-[#E60023] px-4 py-2.5 text-xs font-semibold text-white transition-colors hover:bg-[#CC001F]"
-                      >
-                        <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span>Reset Filters</span>
-                      </button>
-                    )
                   )}
                 </div>
               ) : (
                 <>
-                  {/* Masonry Grid: 2 columns mobile, 3 tablet, 4 desktop */}
-                  <div className="columns-2 gap-4 pb-24 md:columns-3 xl:columns-4">
+                  {/* Configurable Density Grid (2x Standard / 3x Compact / 4x Ultra) */}
+                  <div className={`${galleryGridClasses} pb-20`}>
                     {visiblePins.map((pin, index) => {
                       const isSelected = selectedIds.has(pin.id);
                       const isHighlighted = index === highlightedIndex;
                       const isFavorite = favoriteIds.has(pin.id);
+                      const isDownloaded = downloadedIds.has(pin.id);
                       const isRecentlyApplied = pin.id === recentlyAppliedPinId;
 
                       return (
@@ -1230,14 +1646,21 @@ export default function App() {
                           isSelected={isSelected}
                           isHighlighted={isHighlighted}
                           isFavorite={isFavorite}
+                          isDownloaded={isDownloaded}
                           isRecentlyApplied={isRecentlyApplied}
                           lockscreenSim={lockscreenSim}
                           isSelectMode={isSelectMode}
+                          gridDensity={gridDensity}
                           activeTag={activeTag}
                           onSelectTag={handleToggleTag}
                           onToggleSelect={toggleSelectPin}
                           onToggleFavorite={handleToggleFavorite}
-                          onOpenLightbox={(p) => setLightboxPinId(p.id)}
+                          onOpenLightbox={(p, openInFullscreen = false) => {
+                            setLightboxInitialFullscreen(Boolean(openInFullscreen));
+                            setLightboxPinId(p.id);
+                            setRecentlyViewed(recordRecentlyViewedPin(p));
+                          }}
+                          onOpenInStudio={handleOpenInStudio}
                           onDownload={async (p, idx) => {
                             await handleSingleDownload(p, idx);
                           }}
@@ -1248,18 +1671,18 @@ export default function App() {
                   </div>
 
                   {/* Infinite Load More Sentinel */}
-                  {!isShowingFavorites && hasMore && (
+                  {hasMore && (
                     <div ref={loadMoreSentinelRef} className="py-8 text-center">
                       {isLoadingMore ? (
-                        <div className="inline-flex items-center gap-2 rounded-xl border border-[#E5E7EB] bg-white px-4 py-2 text-xs font-medium text-[#374151] shadow-sm dark:border-[#1E222B] dark:bg-[#14171D] dark:text-[#D1D5DB]">
-                          <Loader2 className="h-4 w-4 animate-spin text-[#E60023]" aria-hidden="true" />
-                          <span>Loading more 4K wallpapers…</span>
+                        <div className="inline-flex items-center gap-2 rounded-xl border border-[#E5E7EB] bg-white px-4 py-2 text-xs font-semibold text-[#374151] shadow-sm dark:border-white/10 dark:bg-[#171717] dark:text-[#D1D5DB]">
+                          <Loader2 className="h-4 w-4 animate-spin text-[#D91B42]" aria-hidden="true" />
+                          <span>Loading more wallpapers…</span>
                         </div>
                       ) : (
                         <button
                           type="button"
                           onClick={() => void loadMorePins()}
-                          className="inline-flex items-center gap-2 rounded-xl border border-[#E5E7EB] bg-white px-5 py-2.5 text-xs font-semibold text-[#374151] transition-colors hover:bg-[#F3F4F6] hover:text-[#111827] dark:border-[#1E222B] dark:bg-[#14171D] dark:text-[#D1D5DB] dark:hover:bg-[#1E222B] dark:hover:text-[#F3F4F6]"
+                          className="inline-flex items-center gap-2 rounded-xl border border-[#E5E7EB] bg-white px-5 py-2.5 text-xs font-semibold text-[#374151] transition-colors hover:bg-[#F3F4F6] hover:text-[#111827] dark:border-white/10 dark:bg-[#171717] dark:text-[#D1D5DB] dark:hover:bg-[#1E222B] dark:hover:text-white"
                         >
                           <span>Load More Wallpapers</span>
                         </button>
@@ -1273,18 +1696,41 @@ export default function App() {
         )}
       </main>
 
-      {/* Sleek Floating Pill Button for Lockscreen Preview Toggle (Above bottom navigation bar) */}
-      {!isShowingFavorites && activeTab !== 'categories' && (
-        <div className="fixed bottom-20 inset-x-0 z-20 flex justify-center pointer-events-none">
+      {/* Compact Floating Lockscreen Preview Toggle (Crimson/Monochrome Theme) */}
+      {(activeTab !== 'categories' ||
+        openedPack !== null ||
+        openedCustomCollectionId !== null) &&
+        activeTab !== 'studio' &&
+        selectedIds.size === 0 && (
+        <div className="pointer-events-none fixed inset-x-0 bottom-[74px] z-20 flex justify-center px-4">
           <button
             type="button"
             role="switch"
             aria-checked={lockscreenSim}
-            onClick={() => setLockscreenSim((prev) => !prev)}
-            className="pointer-events-auto flex items-center gap-2 rounded-full border border-[#3B82F6]/50 bg-white/90 px-4 py-2 text-xs font-bold text-[#1D4ED8] shadow-2xl backdrop-blur-xl transition-all hover:scale-105 dark:border-[#3B82F6]/60 dark:bg-[#14171D]/90 dark:text-[#60A5FA]"
+            onClick={() => {
+              if (hapticsEnabled) triggerHaptic(25);
+              setLockscreenSim((prev) => !prev);
+            }}
+            className={`pointer-events-auto inline-flex items-center gap-2 rounded-full border px-3.5 py-1.5 text-[11px] font-bold shadow-[0_8px_24px_rgba(0,0,0,0.45)] backdrop-blur-xl transition-all duration-200 active:scale-95 ${
+              lockscreenSim
+                ? 'border-[#D91B42] bg-[#D91B42] text-white ring-2 ring-[#D91B42]/35'
+                : 'border-slate-200/90 bg-white/95 text-slate-800 hover:border-[#D91B42]/50 dark:border-white/15 dark:bg-[#101010]/90 dark:text-zinc-200 dark:hover:border-[#D91B42]/60'
+            }`}
           >
-            <Smartphone className="h-4 w-4 text-[#3B82F6]" />
-            <span>Lockscreen Preview: {lockscreenSim ? 'ON' : 'OFF'}</span>
+            <Smartphone
+              className={`h-3.5 w-3.5 ${lockscreenSim ? 'text-white' : 'text-[#D91B42]'}`}
+              aria-hidden="true"
+            />
+            <span>Lockscreen Preview</span>
+            <span
+              className={`rounded-full px-1.5 py-0.5 font-mono text-[9px] font-extrabold uppercase tracking-wider ${
+                lockscreenSim
+                  ? 'bg-white text-[#D91B42]'
+                  : 'bg-[#D91B42]/15 text-[#D91B42]'
+              }`}
+            >
+              {lockscreenSim ? 'ON' : 'OFF'}
+            </span>
           </button>
         </div>
       )}
@@ -1298,46 +1744,68 @@ export default function App() {
         onDownloadZip={handleBatchDownloadZip}
       />
 
-      {/* Bottom Navigation Bar */}
+      {/* Bottom Navigation Bar (5 Tabs: Discover, Search, Wallpapers, Studio, Library) */}
       <BottomNavBar
         activeTab={activeTab}
         onSelectTab={handleSelectTab}
         favoritesCount={favorites.length}
       />
 
-      {/* Lightbox / Phone Lockscreen Studio Modal */}
-      {lightboxPin && (
-        <LightboxModal
-          pin={lightboxPin}
-          pinIndex={lightboxIndex >= 0 ? lightboxIndex : 0}
-          totalPins={visiblePins.length}
-          isSelected={selectedIds.has(lightboxPin.id)}
-          isFavorite={favoriteIds.has(lightboxPin.id)}
-          activeTag={activeTag}
-          onSelectTag={handleToggleTag}
-          onClose={() => setLightboxPinId(null)}
-          onPrev={
-            lightboxIndex > 0
-              ? () => setLightboxPinId(visiblePins[lightboxIndex - 1].id)
-              : () => {}
-          }
-          onNext={
-            lightboxIndex >= 0 && lightboxIndex < visiblePins.length - 1
-              ? () => setLightboxPinId(visiblePins[lightboxIndex + 1].id)
-              : () => {}
-          }
-          onToggleSelect={toggleSelectPin}
-          onToggleFavorite={handleToggleFavorite}
-          onDownload={async (p, idx) => {
-            await handleSingleDownload(p, idx);
-          }}
-          onDownload916Crop={async (p, idx, dimPercent) => {
-            await handleDownload916Crop(p, idx, dimPercent);
-          }}
-          onApplyWallpaper={handleApplyWallpaper}
-          onDimensionsLoaded={handleDimensionsLoaded}
-        />
-      )}
+      {/* Lightbox / Phone Lockscreen Studio & Edge-to-Edge Fullscreen Modal */}
+      <LightboxModal
+        pin={lightboxPin}
+        pinIndex={lightboxIndex >= 0 ? lightboxIndex : 0}
+        totalPins={lightboxPool.length}
+        initialFullscreen={lightboxInitialFullscreen}
+        isSelected={lightboxPin ? selectedIds.has(lightboxPin.id) : false}
+        isFavorite={lightboxPin ? favoriteIds.has(lightboxPin.id) : false}
+        activeTag={activeTag}
+        onSelectTag={handleToggleTag}
+        onClose={() => {
+          setLightboxPinId(null);
+          setLightboxInitialFullscreen(false);
+        }}
+        onPrev={
+          lightboxIndex > 0
+            ? () => {
+                const prevPin = lightboxPool[lightboxIndex - 1];
+                setLightboxPinId(prevPin.id);
+                setRecentlyViewed(recordRecentlyViewedPin(prevPin));
+              }
+            : () => {}
+        }
+        onNext={
+          lightboxIndex >= 0 && lightboxIndex < lightboxPool.length - 1
+            ? () => {
+                const nextPin = lightboxPool[lightboxIndex + 1];
+                setLightboxPinId(nextPin.id);
+                setRecentlyViewed(recordRecentlyViewedPin(nextPin));
+              }
+            : () => {}
+        }
+        onToggleSelect={toggleSelectPin}
+        onToggleFavorite={handleToggleFavorite}
+        onDownload={async (p, idx, dimPercent) => {
+          await handleSingleDownload(p, idx, dimPercent);
+        }}
+        onDownload916Crop={async (p, idx, dimPercent) => {
+          await handleDownload916Crop(p, idx, dimPercent);
+        }}
+        onApplyWallpaper={handleApplyWallpaper}
+        onOpenInStudio={handleOpenInStudio}
+        onFindSimilar={handleFindSimilar}
+        onDimensionsLoaded={handleDimensionsLoaded}
+        collections={collections}
+        onTogglePinInCollection={(colId, p) => {
+          setCollections(togglePinInSmartCollection(colId, p));
+          setFavorites(getFavoritePins());
+        }}
+        onCreateCollectionWithPin={(name, p) => {
+          const updated = createSmartCollection(name, '', { initialPins: [p] });
+          setCollections(updated);
+          setFavorites(getFavoritePins());
+        }}
+      />
     </div>
   );
 }

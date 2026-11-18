@@ -50,10 +50,25 @@ interface PinterestPageResult {
   pins: NormalizedPin[];
   bookmark: string | null;
   source?: string;
+  rateLimited?: boolean;
 }
 
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+
+const DOMINANT_PALETTE_SWATCHES = [
+  '#0F172A',
+  '#1E1B4B',
+  '#18181B',
+  '#111827',
+  '#1F2937',
+  '#31102F',
+  '#06283D',
+  '#1A1A2E',
+];
+
+// Rate-limit circuit breaker for primary Pinterest endpoint
+let pinterestRateLimitedUntil = 0;
 
 /**
  * Rewrites any i.pinimg.com thumbnail path (/236x/, /474x/, /564x/, /736x/, /1200x/) to /originals/
@@ -71,11 +86,11 @@ export function upgradeToOriginals(url: string): string {
  */
 export function to736xFallback(url: string): string {
   if (!url) return url;
+  if (!url.includes('i.pinimg.com/')) return url;
   const converted = url.replace(
     /https?:\/\/i\.pinimg\.com\/(originals|236x|474x|564x|1200x)\//i,
     'https://i.pinimg.com/736x/'
   );
-  // Pinterest 736x thumbnails are always JPEG
   return converted.replace(/\.(png|webp)$/i, '.jpg');
 }
 
@@ -87,6 +102,25 @@ function decodeHtmlEntities(str: string): string {
     .replace(/&apos;/g, "'")
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>');
+}
+
+/**
+ * Fast, deterministic Unicode script detector for language-independent search handling
+ */
+export function detectScriptLanguage(query: string): string {
+  const q = query.trim();
+  if (/[\u0900-\u097F]/.test(q)) return 'Hindi / Devanagari';
+  if (/[\u0980-\u09FF]/.test(q)) return 'Bengali';
+  if (/[\u0B80-\u0BFF]/.test(q)) return 'Tamil';
+  if (/[\u0C00-\u0C7F]/.test(q)) return 'Telugu';
+  if (/[\u0600-\u06FF]/.test(q)) return 'Arabic / Persian';
+  if (/[\u3040-\u30FF]/.test(q)) return 'Japanese';
+  if (/[\uAC00-\uD7AF\u1100-\u11FF]/.test(q)) return 'Korean';
+  if (/[\u4E00-\u9FFF]/.test(q)) return 'Chinese';
+  if (/[\u0400-\u04FF]/.test(q)) return 'Cyrillic';
+  if (/[\u0E00-\u0E7F]/.test(q)) return 'Thai';
+  if (/[^\x00-\x7F]/.test(q)) return 'Multilingual';
+  return 'English';
 }
 
 /**
@@ -124,9 +158,145 @@ export function parseDirectPinInput(input: string): {
 }
 
 /**
- * Resolves a single Pinterest Pin URL keylessly via:
- * 1) Pinterest public oEmbed endpoint (https://www.pinterest.com/oembed.json?url=...)
- * 2) Public Pin page JSON-LD (<script type="application/ld+json">), OpenGraph meta tags, and embedded PWS JSON
+ * Lightweight pre-flight liveness check that verifies a Pinterest Pin URL (or pin.it shortlink)
+ * actually resolves to a live Pin before initiating high-resolution image fetching.
+ */
+async function validateDirectPinLiveness(
+  rawUrl: string,
+  knownPinId: string | null
+): Promise<{
+  valid: boolean;
+  canonicalUrl?: string;
+  pinId?: string | null;
+  status?: number;
+  reason?: string;
+}> {
+  let targetUrl = rawUrl;
+  let pinId = knownPinId;
+
+  // Step 1: Resolve pin.it shortlinks and verify redirect doesn't 404/fail
+  if (!pinId) {
+    try {
+      const redirectRes = await fetch(rawUrl, {
+        method: 'GET',
+        redirect: 'follow',
+        signal: AbortSignal.timeout(6000),
+        headers: { 'User-Agent': USER_AGENT },
+      });
+      if (redirectRes.status === 404 || redirectRes.status === 410) {
+        return {
+          valid: false,
+          status: redirectRes.status,
+          reason: `Dead shortlink (HTTP ${redirectRes.status})`,
+        };
+      }
+      const finalUrl = redirectRes.url || rawUrl;
+      const match = finalUrl.match(/pinterest\.[a-z.]+\/pin\/([^/?#\s]+)/i);
+      if (match?.[1]) {
+        const seg = match[1];
+        const parts = seg.split('--');
+        pinId = parts[parts.length - 1] || seg;
+        targetUrl = `https://www.pinterest.com/pin/${pinId}/`;
+      } else {
+        return {
+          valid: false,
+          status: redirectRes.status,
+          reason: 'Shortlink does not point to a Pinterest Pin',
+        };
+      }
+    } catch {
+      return {
+        valid: false,
+        reason: 'Dead or unreachable pin.it link',
+      };
+    }
+  }
+
+  // Reject obviously invalid Pin IDs (e.g. non-alphanumeric or too short)
+  if (pinId && !/^[a-zA-Z0-9_-]{4,40}$/.test(pinId)) {
+    return {
+      valid: false,
+      reason: 'Invalid Pinterest Pin ID format',
+    };
+  }
+
+  const canonicalUrl = pinId ? `https://www.pinterest.com/pin/${pinId}/` : targetUrl;
+  const oembedEndpoint = `https://www.pinterest.com/oembed.json?url=${encodeURIComponent(
+    canonicalUrl
+  )}`;
+
+  // Step 2: Fast oEmbed probe (lightweight JSON, no full HTML or image download)
+  try {
+    const oembedRes = await fetch(oembedEndpoint, {
+      signal: AbortSignal.timeout(6000),
+      headers: {
+        'User-Agent': USER_AGENT,
+        Accept: 'application/json',
+      },
+    });
+
+    if (oembedRes.ok) {
+      const data = (await oembedRes.json().catch(() => null)) as Record<string, unknown> | null;
+      if (data && typeof data.thumbnail_url === 'string' && data.thumbnail_url.startsWith('http')) {
+        return { valid: true, canonicalUrl, pinId, status: 200 };
+      }
+    }
+
+    if (oembedRes.status === 404 || oembedRes.status === 410) {
+      return {
+        valid: false,
+        canonicalUrl,
+        pinId,
+        status: oembedRes.status,
+        reason: `Dead Pin URL (HTTP ${oembedRes.status})`,
+      };
+    }
+  } catch {
+    // Fall through to lightweight HEAD check
+  }
+
+  // Step 3: Fallback lightweight HEAD check on canonical Pinterest Pin page
+  try {
+    const headRes = await fetch(canonicalUrl, {
+      method: 'HEAD',
+      redirect: 'follow',
+      signal: AbortSignal.timeout(6000),
+      headers: { 'User-Agent': USER_AGENT },
+    });
+
+    if (headRes.status === 404 || headRes.status === 410) {
+      return {
+        valid: false,
+        canonicalUrl,
+        pinId,
+        status: headRes.status,
+        reason: `Dead Pin URL (HTTP ${headRes.status})`,
+      };
+    }
+
+    if (headRes.ok || headRes.status === 405) {
+      return { valid: true, canonicalUrl, pinId, status: headRes.status };
+    }
+
+    return {
+      valid: false,
+      canonicalUrl,
+      pinId,
+      status: headRes.status,
+      reason: `Pin unavailable (HTTP ${headRes.status})`,
+    };
+  } catch {
+    return {
+      valid: false,
+      canonicalUrl,
+      pinId,
+      reason: 'Pin URL timed out or unreachable',
+    };
+  }
+}
+
+/**
+ * Resolves a single Pinterest Pin URL keylessly via oEmbed + JSON-LD + OpenGraph
  */
 async function resolveSinglePinUrl(
   rawUrl: string,
@@ -139,7 +309,6 @@ async function resolveSinglePinUrl(
   let targetUrl = rawUrl;
   let pinId = knownPinId;
 
-  // Follow pin.it redirect if needed
   if (!pinId) {
     try {
       const headRes = await fetch(rawUrl, {
@@ -189,11 +358,10 @@ async function resolveSinglePinUrl(
     typeof oembed?.thumbnail_url === 'string' ? oembed.thumbnail_url.trim() : '';
   let width = typeof oembed?.width === 'number' ? oembed.width : 0;
   let height = typeof oembed?.height === 'number' ? oembed.height : 0;
-  let dominantColor = '#1E2229';
+  const dominantColor = '#1E2229';
   const relatedPins: NormalizedPin[] = [];
 
   if (html) {
-    // 1. Parse JSON-LD blocks (<script type="application/ld+json">)
     const ldJsonRegex =
       /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
     let ldMatch: RegExpExecArray | null;
@@ -225,7 +393,6 @@ async function resolveSinglePinUrl(
       }
     }
 
-    // 2. Parse OpenGraph tags if still missing image or title
     if (!rawImageUrl) {
       const ogImageMatch =
         html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) ||
@@ -257,7 +424,6 @@ async function resolveSinglePinUrl(
       if (ogH?.[1]) height = Number(ogH[1]);
     }
 
-    // 3. Look for direct /originals/ URL in page payload for this pin
     const originalsRegex =
       /https:\/\/i\.pinimg\.com\/originals\/[0-9a-f]{2}\/[0-9a-f]{2}\/[0-9a-f]{2}\/[0-9a-f]+\.(?:jpg|jpeg|png|webp)/gi;
     const foundOriginals = html.match(originalsRegex) || [];
@@ -265,7 +431,6 @@ async function resolveSinglePinUrl(
       rawImageUrl = foundOriginals[0];
     }
 
-    // Extract any extra pin images embedded in the public page as related pins
     const allPinImgs =
       html.match(
         /https:\/\/i\.pinimg\.com\/(?:originals|736x|564x|474x)\/[0-9a-f]{2}\/[0-9a-f]{2}\/[0-9a-f]{2}\/[0-9a-f]+\.(?:jpg|jpeg|png|webp)/gi
@@ -301,7 +466,6 @@ async function resolveSinglePinUrl(
     return { primaryPin: null, relatedPins: [], resolvedPinId: pinId };
   }
 
-  // Upgrade width/height estimate when upgrading from thumbnail to /originals/
   const finalWidth = width >= 600 ? width : 1080;
   const finalHeight = height >= 600 ? height : 1620;
 
@@ -331,6 +495,7 @@ async function getPinterestSession(forceRefresh = false): Promise<PinterestSessi
   }
 
   const pageRes = await fetch('https://www.pinterest.com/search/pins/?q=design', {
+    signal: AbortSignal.timeout(5000),
     headers: {
       'User-Agent': USER_AGENT,
       Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -361,7 +526,7 @@ async function getPinterestSession(forceRefresh = false): Promise<PinterestSessi
 }
 
 /**
- * Source 1: Keyless public Pinterest BaseSearchResource endpoint
+ * Source 1: Keyless public Pinterest BaseSearchResource endpoint with rate-limit detection
  */
 async function fetchPinterestPage(
   query: string,
@@ -371,6 +536,11 @@ async function fetchPinterestPage(
   const cleanQuery = query.trim();
   if (!cleanQuery || bookmark === '-end-') {
     return { pins: [], bookmark: null };
+  }
+
+  // Respect active rate-limit circuit breaker
+  if (Date.now() < pinterestRateLimitedUntil) {
+    return { pins: [], bookmark: null, source: 'pinterest-rate-limited', rateLimited: true };
   }
 
   const runRequest = async (session: PinterestSession): Promise<Response> => {
@@ -394,6 +564,7 @@ async function fetchPinterestPage(
       `source_url=${encodeURIComponent(sourceUrl)}&data=${encodeURIComponent(dataPayload)}`;
 
     return fetch(targetUrl, {
+      signal: AbortSignal.timeout(6500),
       headers: {
         'User-Agent': USER_AGENT,
         Accept: 'application/json, text/javascript, */*; q=0.01',
@@ -409,91 +580,120 @@ async function fetchPinterestPage(
     });
   };
 
-  let session = await getPinterestSession(false);
-  let upstream = await runRequest(session);
+  try {
+    let session = await getPinterestSession(false);
+    let upstream = await runRequest(session);
 
-  if (upstream.status === 403 || upstream.status === 401) {
-    session = await getPinterestSession(true);
-    upstream = await runRequest(session);
-  }
+    if (upstream.status === 403 || upstream.status === 401) {
+      session = await getPinterestSession(true);
+      upstream = await runRequest(session);
+    }
 
-  if (!upstream.ok) {
-    return { pins: [], bookmark: null };
-  }
+    if (upstream.status === 429 || upstream.status === 503) {
+      // Trip circuit breaker for 45 seconds so fallback sources handle traffic immediately
+      pinterestRateLimitedUntil = Date.now() + 45_000;
+      return { pins: [], bookmark: null, source: 'pinterest-rate-limited', rateLimited: true };
+    }
 
-  const json = (await upstream.json()) as {
-    resource_response?: {
-      bookmark?: string;
-      data?: {
-        results?: PinterestRawItem[];
+    if (!upstream.ok) {
+      return { pins: [], bookmark: null };
+    }
+
+    const json = (await upstream.json()) as {
+      resource_response?: {
+        bookmark?: string;
+        data?: {
+          results?: PinterestRawItem[];
+        };
       };
     };
-  };
 
-  const rawResults = json?.resource_response?.data?.results || [];
-  const nextBookmark = json?.resource_response?.bookmark || null;
+    const rawResults = json?.resource_response?.data?.results || [];
+    const nextBookmark = json?.resource_response?.bookmark || null;
 
-  const pins = rawResults
-    .filter(
-      (item) =>
-        !item?.is_promoted &&
-        Boolean(
-          item?.images?.orig?.url ||
-            item?.images?.['736x']?.url ||
-            item?.images?.['564x']?.url ||
-            item?.images?.['474x']?.url
-        )
-    )
-    .map((item) => {
-      const bestVariant =
-        item.images?.orig ||
-        item.images?.['736x'] ||
-        item.images?.['564x'] ||
-        item.images?.['474x'] ||
-        item.images?.['236x'];
-      const rawUrl = bestVariant!.url;
-      const upgradedOriginal = item.images?.orig?.url || upgradeToOriginals(rawUrl);
-      const fallback736 =
-        item.images?.['736x']?.url ||
-        item.images?.['564x']?.url ||
-        item.images?.['474x']?.url ||
-        to736xFallback(upgradedOriginal);
+    const pins = rawResults
+      .filter(
+        (item) =>
+          !item?.is_promoted &&
+          Boolean(
+            item?.images?.orig?.url ||
+              item?.images?.['736x']?.url ||
+              item?.images?.['564x']?.url ||
+              item?.images?.['474x']?.url
+          )
+      )
+      .map((item) => {
+        const bestVariant =
+          item.images?.orig ||
+          item.images?.['736x'] ||
+          item.images?.['564x'] ||
+          item.images?.['474x'] ||
+          item.images?.['236x'];
+        const rawUrl = bestVariant!.url;
+        const upgradedOriginal = item.images?.orig?.url || upgradeToOriginals(rawUrl);
+        const fallback736 =
+          item.images?.['736x']?.url ||
+          item.images?.['564x']?.url ||
+          item.images?.['474x']?.url ||
+          to736xFallback(upgradedOriginal);
 
-      const cleanTitle = (item.grid_title || item.title || item.description || cleanQuery)
-        .replace(/\s+/g, ' ')
-        .trim();
+        const cleanTitle = (item.grid_title || item.title || item.description || cleanQuery)
+          .replace(/\s+/g, ' ')
+          .trim();
 
-      return {
-        id: String(item.id || crypto.randomUUID()),
-        title: cleanTitle || cleanQuery,
-        imageUrl: upgradeToOriginals(upgradedOriginal),
-        fallbackUrl: fallback736,
-        width: item.images?.orig?.width || bestVariant?.width || 1000,
-        height: item.images?.orig?.height || bestVariant?.height || 1500,
-        dominantColor: item.dominant_color || '#1E2229',
-        sourceUrl: `https://www.pinterest.com/pin/${item.id}/`,
-      };
-    });
+        return {
+          id: String(item.id || crypto.randomUUID()),
+          title: cleanTitle || cleanQuery,
+          imageUrl: upgradeToOriginals(upgradedOriginal),
+          fallbackUrl: fallback736,
+          width: item.images?.orig?.width || bestVariant?.width || 1080,
+          height: item.images?.orig?.height || bestVariant?.height || 1920,
+          dominantColor: item.dominant_color || '#1E2229',
+          sourceUrl: `https://www.pinterest.com/pin/${item.id}/`,
+        };
+      });
 
-  return {
-    pins,
-    bookmark: nextBookmark && nextBookmark !== '-end-' ? nextBookmark : null,
-    source: 'pinterest-resource',
-  };
+    return {
+      pins,
+      bookmark: nextBookmark && nextBookmark !== '-end-' ? nextBookmark : null,
+      source: 'pinterest',
+    };
+  } catch {
+    return { pins: [], bookmark: null, source: 'pinterest-error', rateLimited: true };
+  }
 }
 
 /**
- * Source 2: Keyless Public Search Engine fallback scoped to site:pinterest.com / i.pinimg.com
- * Queries Bing Images async HTML feed for site:pinterest.com and extracts real i.pinimg.com images & pin links
+ * Source 2: Multi-Mode Bing Image Search Engine (Pinterest-scoped + High-Res Vertical Wallpaper stream)
+ * Supports pagination via offset (`bing:<offset>`) and works across all languages and scripts.
  */
-async function fetchPublicPinimgFallback(query: string): Promise<NormalizedPin[]> {
+async function fetchBingImageSearchPage(
+  query: string,
+  offset = 0,
+  mode: 'pinterest-scoped' | 'diverse-wallpaper' = 'pinterest-scoped'
+): Promise<NormalizedPin[]> {
   try {
-    const scopedQuery = `site:pinterest.com ${query.trim()}`;
+    const clean = query.trim();
+    const hasWallpaperKeyword = /wallpaper|lockscreen|background|amoled|4k/i.test(clean);
+    const searchPhrase =
+      mode === 'pinterest-scoped'
+        ? `site:pinterest.com ${clean}`
+        : hasWallpaperKeyword
+        ? `${clean} phone 4k`
+        : `${clean} phone wallpaper 4k`;
+
+    // For diverse-wallpaper mode, request tall/portrait high-resolution images from Bing
+    const qftParam =
+      mode === 'diverse-wallpaper'
+        ? '&qft=+filterui:imagesize-large+filterui:aspect-tall'
+        : '';
+
     const url = `https://www.bing.com/images/async?q=${encodeURIComponent(
-      scopedQuery
-    )}&first=0&count=35&mmasync=1`;
+      searchPhrase
+    )}&first=${offset}&count=35&mmasync=1${qftParam}`;
 
     const res = await fetch(url, {
+      signal: AbortSignal.timeout(6000),
       headers: {
         'User-Agent': USER_AGENT,
         Accept: 'text/html,application/xhtml+xml,*/*;q=0.8',
@@ -506,46 +706,75 @@ async function fetchPublicPinimgFallback(query: string): Promise<NormalizedPin[]
     const pins: NormalizedPin[] = [];
     const seenUrls = new Set<string>();
 
-    // Bing encodes metadata in m="{...}" attributes on .iusc elements
-    const metaRegex = /\bm=["'](\{[^"']*pinimg\.com[^"']*\})["']/gi;
+    // Match all Bing image metadata blocks: m="{...}"
+    const metaRegex = /\bm=["'](\{[^"']+\})["']/gi;
     let match: RegExpExecArray | null;
+    let idx = 0;
 
     while ((match = metaRegex.exec(html)) !== null) {
       try {
         const decodedJson = decodeHtmlEntities(match[1]);
         const data = JSON.parse(decodedJson) as {
           murl?: string;
+          turl?: string;
           purl?: string;
           t?: string;
+          mw?: number;
+          mh?: number;
         };
 
-        const murl = data.murl || '';
-        if (!murl.startsWith('https://i.pinimg.com/')) continue;
+        const murl = (data.murl || '').trim();
+        const turl = (data.turl || '').trim();
+        if (!murl.startsWith('https://')) continue;
 
-        const upgraded = upgradeToOriginals(murl);
-        if (seenUrls.has(upgraded)) continue;
-        seenUrls.add(upgraded);
+        const isPinimg = murl.startsWith('https://i.pinimg.com/');
+        if (mode === 'pinterest-scoped' && !isPinimg) continue;
+
+        const primaryUrl = isPinimg ? upgradeToOriginals(murl) : murl;
+        if (seenUrls.has(primaryUrl)) continue;
+        seenUrls.add(primaryUrl);
+
+        const fallbackUrl = isPinimg
+          ? to736xFallback(murl)
+          : turl.startsWith('https://')
+          ? turl
+          : `/api/download?url=${encodeURIComponent(murl)}&inline=1`;
+
+        // Extract dimensions from surrounding HTML or default to 9:16 HD
+        const width = data.mw && data.mw >= 500 ? data.mw : 1080;
+        const height = data.mh && data.mh >= 700 ? data.mh : 1920;
 
         const pinIdMatch = (data.purl || '').match(/\/pin\/(?:[^/?#]*--)?(\d{8,25})/);
-        const pinId = pinIdMatch?.[1] || `pub-${ seenUrls.size }-${Date.now()}`;
+        const hashSeed = primaryUrl
+          .split('/')
+          .pop()
+          ?.replace(/[^a-zA-Z0-9]/g, '')
+          .slice(0, 14);
+        const pinId =
+          pinIdMatch?.[1] || `bing-${mode === 'pinterest-scoped' ? 'pin' : 'wall'}-${offset + idx}-${hashSeed || idx}`;
+
         const cleanTitle = (data.t || query)
           .replace(/[\uE000-\uF8FF]/g, '')
-          .replace(/\s*\|\s*Pinterest.*$/i, '')
+          .replace(/\s*\|\s*(Pinterest|Bing).*$/i, '')
           .trim();
+
+        const dominantColor =
+          DOMINANT_PALETTE_SWATCHES[(offset + idx) % DOMINANT_PALETTE_SWATCHES.length];
 
         pins.push({
           id: pinId,
           title: cleanTitle || query,
-          imageUrl: upgraded,
-          fallbackUrl: to736xFallback(murl),
-          width: 1000,
-          height: 1500,
-          dominantColor: '#1E2229',
+          imageUrl: primaryUrl,
+          fallbackUrl,
+          width,
+          height,
+          dominantColor,
           sourceUrl:
-            data.purl && data.purl.includes('pinterest.')
+            data.purl && data.purl.startsWith('https://')
               ? data.purl
               : `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(query)}`,
         });
+        idx += 1;
       } catch {
         // Skip malformed item
       }
@@ -557,39 +786,145 @@ async function fetchPublicPinimgFallback(query: string): Promise<NormalizedPin[]
   }
 }
 
-async function fetchPinterestMultiPage(
+/**
+ * Combines both Bing streams (Pinterest-scoped + Diverse High-Res Vertical Wallpapers)
+ * and provides a `bing:<nextOffset>` cursor for infinite pagination.
+ */
+async function fetchBingMultiSourceFallback(
   query: string,
-  pages = 2,
-  startBookmark?: string | null
+  offset = 0
 ): Promise<PinterestPageResult> {
-  const allPins: NormalizedPin[] = [];
-  let cursor: string | null | undefined = startBookmark;
+  const [scopedPins, diversePins] = await Promise.all([
+    fetchBingImageSearchPage(query, offset, 'pinterest-scoped'),
+    fetchBingImageSearchPage(query, offset, 'diverse-wallpaper'),
+  ]);
 
-  for (let i = 0; i < pages; i++) {
-    const page = await fetchPinterestPage(query, 50, cursor);
-    if (page.pins.length > 0) {
-      allPins.push(...page.pins);
-    }
-    cursor = page.bookmark;
-    if (!cursor || page.pins.length === 0) break;
-  }
-
-  // If primary Pinterest resource endpoint returned no pins on initial page, run public search fallback
-  if (allPins.length === 0 && !startBookmark) {
-    const fallbackPins = await fetchPublicPinimgFallback(query);
-    if (fallbackPins.length > 0) {
-      return {
-        pins: fallbackPins,
-        bookmark: null,
-        source: 'public-search-fallback',
-      };
-    }
-  }
+  const interleaved = interleavePinLists([scopedPins, diversePins]);
+  const nextOffset = offset + 35;
+  const hasMore = interleaved.length >= 10 && nextOffset <= 210;
 
   return {
-    pins: allPins,
-    bookmark: cursor || null,
-    source: 'pinterest-resource',
+    pins: interleaved,
+    bookmark: hasMore ? `bing:${nextOffset}` : null,
+    source: 'bing',
+  };
+}
+
+/**
+ * Interleaves multiple pin lists round-robin while deduplicating by ID and canonical image signature
+ */
+function interleavePinLists(lists: NormalizedPin[][]): NormalizedPin[] {
+  const seenIds = new Set<string>();
+  const seenSignatures = new Set<string>();
+  const result: NormalizedPin[] = [];
+
+  const getSignature = (url: string): string => {
+    const file = url.split('/').pop()?.split('?')[0] || url;
+    return file.toLowerCase();
+  };
+
+  const maxLen = Math.max(0, ...lists.map((l) => l.length));
+  for (let i = 0; i < maxLen; i++) {
+    for (const list of lists) {
+      if (i >= list.length) continue;
+      const pin = list[i];
+      const sig = getSignature(pin.imageUrl);
+      if (seenIds.has(pin.id) || seenSignatures.has(sig)) continue;
+      seenIds.add(pin.id);
+      seenSignatures.add(sig);
+      result.push(pin);
+    }
+  }
+
+  return result;
+}
+
+async function fetchMultiSourceWallpapers(
+  query: string,
+  pages = 2,
+  startBookmark?: string | null,
+  preferredSource: 'auto' | 'multi' | 'pinterest' | 'bing' = 'multi'
+): Promise<PinterestPageResult & { sourcesUsed: string[] }> {
+  // If cursor is a Bing pagination cursor (`bing:35`), fetch directly from Bing
+  if (startBookmark && startBookmark.startsWith('bing:')) {
+    const offset = parseInt(startBookmark.slice(5), 10) || 35;
+    const bingBatch = await fetchBingMultiSourceFallback(query, offset);
+    return {
+      ...bingBatch,
+      sourcesUsed: ['bing'],
+    };
+  }
+
+  // If caller explicitly requested Bing fallback or Pinterest is rate-limited
+  if (preferredSource === 'bing' || Date.now() < pinterestRateLimitedUntil) {
+    const bingBatch = await fetchBingMultiSourceFallback(query, 0);
+    return {
+      ...bingBatch,
+      rateLimited: Date.now() < pinterestRateLimitedUntil,
+      sourcesUsed: ['bing'],
+    };
+  }
+
+  // Run Pinterest primary search and (on initial page in multi/auto mode) concurrent Bing diversity search
+  const shouldIncludeBing = !startBookmark && (preferredSource === 'multi' || preferredSource === 'auto');
+
+  const pinterestPromise = (async () => {
+    const allPins: NormalizedPin[] = [];
+    let cursor: string | null | undefined = startBookmark;
+    let rateLimited = false;
+
+    for (let i = 0; i < pages; i++) {
+      const page = await fetchPinterestPage(query, 50, cursor);
+      if (page.rateLimited) {
+        rateLimited = true;
+        break;
+      }
+      if (page.pins.length > 0) {
+        allPins.push(...page.pins);
+      }
+      cursor = page.bookmark;
+      if (!cursor || page.pins.length === 0) break;
+    }
+
+    return { pins: allPins, bookmark: cursor || null, rateLimited };
+  })();
+
+  const bingPromise = shouldIncludeBing
+    ? fetchBingMultiSourceFallback(query, 0)
+    : Promise.resolve({ pins: [], bookmark: null, source: 'bing' });
+
+  const [pinterestResult, bingResult] = await Promise.all([pinterestPromise, bingPromise]);
+
+  // If Pinterest was rate-limited or returned 0 pins, rely on Bing and use Bing's pagination cursor
+  if (pinterestResult.pins.length === 0) {
+    const fallbackBing =
+      bingResult.pins.length > 0
+        ? bingResult
+        : await fetchBingMultiSourceFallback(query, 0);
+    return {
+      pins: fallbackBing.pins,
+      bookmark: fallbackBing.bookmark,
+      source: 'bing',
+      rateLimited: pinterestResult.rateLimited,
+      sourcesUsed: fallbackBing.pins.length > 0 ? ['bing'] : [],
+    };
+  }
+
+  // Blend Pinterest + Bing results for maximum diversity
+  const combinedPins =
+    bingResult.pins.length > 0
+      ? interleavePinLists([pinterestResult.pins, bingResult.pins])
+      : pinterestResult.pins;
+
+  const sourcesUsed =
+    bingResult.pins.length > 0 ? ['pinterest', 'bing'] : ['pinterest'];
+
+  return {
+    pins: combinedPins,
+    bookmark: pinterestResult.bookmark || bingResult.bookmark || null,
+    source: sourcesUsed.length > 1 ? 'multi-source' : 'pinterest',
+    rateLimited: pinterestResult.rateLimited,
+    sourcesUsed,
   };
 }
 
@@ -613,7 +948,7 @@ async function expandMultilingualQuery(query: string): Promise<QueryExpansion | 
       config: {
         thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
         systemInstruction:
-          'Detect the language of the search query and produce concise, high-signal Pinterest image search queries. If the query is non-English or transliterated (e.g. Hindi, Hinglish, Tamil, Telugu, Marathi, Bengali, Arabic, Japanese, Korean, Spanish), translate its visual intent into natural English search keywords plus a Pinterest-friendly localized/transliterated query (e.g. "hindi motivational quotes", "ganpati bappa wallpaper"). If already standard English, keep englishQuery accurate and provide a closely related visual synonym in localizedQuery.',
+          'Detect the language of the search query and produce concise, high-signal Pinterest and Bing image search queries. If the query is non-English or transliterated (e.g. Hindi, Hinglish, Tamil, Telugu, Marathi, Bengali, Arabic, Japanese, Korean, Spanish), translate its visual intent into natural English search keywords plus a localized/transliterated query (e.g. "hindi motivational quotes", "ganpati bappa wallpaper"). If already standard English, keep englishQuery accurate and provide a closely related visual synonym in localizedQuery.',
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
@@ -624,12 +959,12 @@ async function expandMultilingualQuery(query: string): Promise<QueryExpansion | 
             },
             englishQuery: {
               type: Type.STRING,
-              description: 'Concise 2-5 word English Pinterest search query.',
+              description: 'Concise 2-5 word English wallpaper search query.',
             },
             localizedQuery: {
               type: Type.STRING,
               description:
-                'Romanized/transliterated or localized Pinterest search phrase combining intent and language if non-English.',
+                'Romanized/transliterated or localized search phrase combining intent and language if non-English.',
             },
           },
           required: ['detectedLanguage', 'englishQuery', 'localizedQuery'],
@@ -643,7 +978,7 @@ async function expandMultilingualQuery(query: string): Promise<QueryExpansion | 
     if (!parsed.englishQuery) return null;
 
     return {
-      detectedLanguage: parsed.detectedLanguage || 'Detected',
+      detectedLanguage: parsed.detectedLanguage || detectScriptLanguage(query),
       englishQuery: parsed.englishQuery.trim(),
       localizedQuery: (parsed.localizedQuery || parsed.englishQuery).trim(),
     };
@@ -656,22 +991,11 @@ function hasNonAscii(str: string): boolean {
   return /[^\x00-\x7F]/.test(str);
 }
 
-function deduplicatePins(lists: NormalizedPin[][]): NormalizedPin[] {
-  const seenIds = new Set<string>();
-  const seenUrls = new Set<string>();
-  const merged: NormalizedPin[] = [];
-
-  for (const list of lists) {
-    for (const pin of list) {
-      if (seenIds.has(pin.id) || seenUrls.has(pin.imageUrl)) continue;
-      seenIds.add(pin.id);
-      seenUrls.add(pin.imageUrl);
-      merged.push(pin);
-    }
-  }
-
-  return merged;
-}
+const SEARCH_RESPONSE_CACHE = new Map<
+  string,
+  { body: Record<string, unknown>; expiresAt: number }
+>();
+const SERVER_CACHE_TTL_MS = 10 * 60 * 1000;
 
 export async function GET(request: Request): Promise<Response> {
   try {
@@ -679,12 +1003,47 @@ export async function GET(request: Request): Promise<Response> {
     const q = searchParams.get('q')?.trim();
     const cursor = searchParams.get('cursor')?.trim() || null;
     const activeSearchQueryParam = searchParams.get('activeQuery')?.trim() || null;
+    const sourceParam = (searchParams.get('source')?.trim() || 'multi') as
+      | 'auto'
+      | 'multi'
+      | 'pinterest'
+      | 'bing';
+    const freshParam = searchParams.get('fresh') === '1';
+    const exactPinParam = searchParams.get('exactPin') === '1';
+    const validateOnlyParam = searchParams.get('validateOnly') === '1';
 
     if (!q) {
       return Response.json({ error: 'Missing query parameter "q"' }, { status: 400 });
     }
 
-    // Check if the user pasted a direct Pinterest Pin URL (e.g., https://www.pinterest.com/pin/...)
+    if (validateOnlyParam) {
+      const directCheck = parseDirectPinInput(q);
+      if (!directCheck.isPinUrl || !directCheck.rawUrl) {
+        return Response.json({
+          valid: false,
+          reason: 'Not a valid Pinterest Pin URL',
+        });
+      }
+      const liveness = await validateDirectPinLiveness(directCheck.rawUrl, directCheck.pinId);
+      return Response.json(liveness, {
+        headers: { 'Cache-Control': 'no-store' },
+      });
+    }
+
+    const cacheKey = `${q.toLowerCase()}|${cursor || ''}|${activeSearchQueryParam || ''}|${sourceParam}|${exactPinParam ? 'exact' : 'full'}`;
+    if (!freshParam) {
+      const hit = SEARCH_RESPONSE_CACHE.get(cacheKey);
+      if (hit && hit.expiresAt > Date.now()) {
+        return Response.json(hit.body, {
+          headers: {
+            'Cache-Control': 's-maxage=300, stale-while-revalidate',
+            'x-pingrab-cache': 'HIT',
+          },
+        });
+      }
+    }
+
+    // Check if the user pasted a direct Pinterest Pin URL
     const directPin = parseDirectPinInput(q);
     if (directPin.isPinUrl && directPin.rawUrl && !cursor) {
       const resolved = await resolveSinglePinUrl(directPin.rawUrl, directPin.pinId);
@@ -692,7 +1051,7 @@ export async function GET(request: Request): Promise<Response> {
       let nextCursor: string | null = null;
       let activeSearchQuery = q;
 
-      if (resolved.primaryPin) {
+      if (!exactPinParam && resolved.primaryPin) {
         const seedQuery =
           resolved.primaryPin.title &&
           !resolved.primaryPin.title.toLowerCase().startsWith('pinterest pin')
@@ -700,87 +1059,121 @@ export async function GET(request: Request): Promise<Response> {
             : '';
 
         if (seedQuery.length >= 3) {
-          const searchBatch = await fetchPinterestPage(seedQuery, 35);
+          const searchBatch = await fetchMultiSourceWallpapers(seedQuery, 1, null, 'multi');
           extraRelated = searchBatch.pins;
           nextCursor = searchBatch.bookmark;
           activeSearchQuery = seedQuery;
         }
       }
 
-      const results = deduplicatePins([
-        resolved.primaryPin ? [resolved.primaryPin] : [],
-        resolved.relatedPins,
-        extraRelated,
-      ]);
+      const results = exactPinParam
+        ? resolved.primaryPin
+          ? [resolved.primaryPin]
+          : []
+        : interleavePinLists([
+            resolved.primaryPin ? [resolved.primaryPin] : [],
+            resolved.relatedPins,
+            extraRelated,
+          ]);
 
-      return Response.json(
-        {
-          results,
-          nextCursor,
-          activeSearchQuery,
-          hasMore: Boolean(nextCursor && results.length > 1),
-          meta: {
-            query: q,
-            detectedLanguage: 'Pin URL',
-            translatedQuery: resolved.primaryPin?.title || null,
-            isDirectPin: true,
-            resolvedPinId: resolved.resolvedPinId || resolved.primaryPin?.id,
-            source: 'oembed+jsonld',
-          },
+      const payload = {
+        results,
+        nextCursor,
+        activeSearchQuery,
+        hasMore: Boolean(!exactPinParam && nextCursor && results.length > 1),
+        meta: {
+          query: q,
+          detectedLanguage: 'Pin URL',
+          translatedQuery: resolved.primaryPin?.title || null,
+          isDirectPin: true,
+          resolvedPinId: resolved.resolvedPinId || resolved.primaryPin?.id,
+          source: 'oembed+jsonld',
+          sourcesUsed: ['pinterest'],
         },
-        {
-          headers: {
-            'Cache-Control': 's-maxage=300, stale-while-revalidate',
-          },
-        }
-      );
+      };
+
+      SEARCH_RESPONSE_CACHE.set(cacheKey, {
+        body: payload,
+        expiresAt: Date.now() + SERVER_CACHE_TTL_MS,
+      });
+
+      return Response.json(payload, {
+        headers: {
+          'Cache-Control': 's-maxage=300, stale-while-revalidate',
+        },
+      });
     }
 
-    // Paginated Load More flow
+    // Paginated Load More flow (supports both Pinterest bookmarks and `bing:<offset>` cursors)
     if (cursor) {
       const targetQuery = activeSearchQueryParam || q;
-      const pageBatch = await fetchPinterestMultiPage(targetQuery, 2, cursor);
-      const results = deduplicatePins([pageBatch.pins]);
-
-      return Response.json(
-        {
-          results,
-          nextCursor: pageBatch.bookmark,
-          activeSearchQuery: targetQuery,
-          hasMore: Boolean(pageBatch.bookmark && results.length > 0),
-        },
-        {
-          headers: {
-            'Cache-Control': 's-maxage=300, stale-while-revalidate',
-          },
-        }
+      const pageBatch = await fetchMultiSourceWallpapers(
+        targetQuery,
+        1,
+        cursor,
+        sourceParam
       );
+      const results = interleavePinLists([pageBatch.pins]);
+
+      const payload = {
+        results,
+        nextCursor: pageBatch.bookmark,
+        activeSearchQuery: targetQuery,
+        hasMore: Boolean(pageBatch.bookmark && results.length > 0),
+        meta: {
+          detectedLanguage: detectScriptLanguage(targetQuery),
+          source: pageBatch.source || 'multi-source',
+          sourcesUsed: pageBatch.sourcesUsed,
+          rateLimitedFallback: Boolean(pageBatch.rateLimited),
+        },
+      };
+
+      if (results.length > 0) {
+        SEARCH_RESPONSE_CACHE.set(cacheKey, {
+          body: payload,
+          expiresAt: Date.now() + SERVER_CACHE_TTL_MS,
+        });
+      }
+
+      return Response.json(payload, {
+        headers: {
+          'Cache-Control': 's-maxage=300, stale-while-revalidate',
+        },
+      });
     }
 
     const nonAscii = hasNonAscii(q);
+    const scriptLanguage = detectScriptLanguage(q);
 
-    let directBatch: PinterestPageResult = { pins: [], bookmark: null };
+    let directBatch: PinterestPageResult & { sourcesUsed: string[] } = {
+      pins: [],
+      bookmark: null,
+      sourcesUsed: [],
+    };
     let expansion: QueryExpansion | null = null;
 
     if (nonAscii) {
       [directBatch, expansion] = await Promise.all([
-        fetchPinterestMultiPage(q, 2),
+        fetchMultiSourceWallpapers(q, 1, null, sourceParam),
         expandMultilingualQuery(q),
       ]);
     } else {
-      directBatch = await fetchPinterestMultiPage(q, 2);
-      if (directBatch.pins.length < 15) {
+      directBatch = await fetchMultiSourceWallpapers(q, 1, null, sourceParam);
+      if (directBatch.pins.length < 18) {
         expansion = await expandMultilingualQuery(q);
       }
     }
 
-    const secondaryPromises: Array<{ query: string; promise: Promise<PinterestPageResult> }> = [];
+    const secondaryPromises: Array<{
+      query: string;
+      promise: Promise<PinterestPageResult & { sourcesUsed: string[] }>;
+    }> = [];
     if (expansion) {
       const normalizedOrig = q.toLowerCase();
       if (expansion.localizedQuery && expansion.localizedQuery.toLowerCase() !== normalizedOrig) {
         secondaryPromises.push({
           query: expansion.localizedQuery,
-          promise: fetchPinterestMultiPage(expansion.localizedQuery, 2),
+          promise: fetchMultiSourceWallpapers(expansion.localizedQuery, 1, null, sourceParam),
         });
       }
       if (
@@ -790,7 +1183,7 @@ export async function GET(request: Request): Promise<Response> {
       ) {
         secondaryPromises.push({
           query: expansion.englishQuery,
-          promise: fetchPinterestMultiPage(expansion.englishQuery, 2),
+          promise: fetchMultiSourceWallpapers(expansion.englishQuery, 1, null, sourceParam),
         });
       }
     }
@@ -800,16 +1193,22 @@ export async function GET(request: Request): Promise<Response> {
         ? await Promise.all(secondaryPromises.map((item) => item.promise))
         : [];
 
-    let results = deduplicatePins([
+    let results = interleavePinLists([
       directBatch.pins,
       ...extraResults.map((batch) => batch.pins),
     ]);
 
-    // If still empty, run public Bing/Pinimg search fallback
+    const allSources = new Set<string>(directBatch.sourcesUsed);
+    extraResults.forEach((b) => b.sourcesUsed.forEach((s) => allSources.add(s)));
+
+    // Final safety net: if still empty, force Bing multi-source fallback on English/original query
     if (results.length === 0) {
       const fallbackQuery = expansion?.englishQuery || q;
-      const publicFallbackPins = await fetchPublicPinimgFallback(fallbackQuery);
-      results = deduplicatePins([publicFallbackPins]);
+      const bingSafetyBatch = await fetchBingMultiSourceFallback(fallbackQuery, 0);
+      results = interleavePinLists([bingSafetyBatch.pins]);
+      if (results.length > 0) {
+        allSources.add('bing');
+      }
     }
 
     // Determine best continuation cursor for "Load More" infinite pagination
@@ -826,28 +1225,45 @@ export async function GET(request: Request): Promise<Response> {
       }
     }
 
-    return Response.json(
-      {
-        results,
-        nextCursor,
-        activeSearchQuery,
-        hasMore: Boolean(nextCursor),
-        meta: {
-          query: q,
-          detectedLanguage: expansion?.detectedLanguage || (nonAscii ? 'Local' : 'English'),
-          translatedQuery:
-            expansion && expansion.englishQuery.toLowerCase() !== q.toLowerCase()
-              ? expansion.englishQuery
-              : null,
-          source: directBatch.source || 'pinterest-resource',
-        },
+    const sourcesUsedArray = Array.from(allSources);
+
+    const payload = {
+      results,
+      nextCursor,
+      activeSearchQuery,
+      hasMore: Boolean(nextCursor),
+      meta: {
+        query: q,
+        detectedLanguage: expansion?.detectedLanguage || scriptLanguage,
+        translatedQuery:
+          expansion && expansion.englishQuery.toLowerCase() !== q.toLowerCase()
+            ? expansion.englishQuery
+            : null,
+        source:
+          sourcesUsedArray.length > 1
+            ? 'multi-source'
+            : sourcesUsedArray[0] || directBatch.source || 'multi-source',
+        sourcesUsed: sourcesUsedArray,
+        rateLimitedFallback: Boolean(directBatch.rateLimited),
       },
-      {
-        headers: {
-          'Cache-Control': 's-maxage=300, stale-while-revalidate',
-        },
+    };
+
+    if (results.length > 0) {
+      if (SEARCH_RESPONSE_CACHE.size >= 100) {
+        const oldestKey = SEARCH_RESPONSE_CACHE.keys().next().value;
+        if (oldestKey) SEARCH_RESPONSE_CACHE.delete(oldestKey);
       }
-    );
+      SEARCH_RESPONSE_CACHE.set(cacheKey, {
+        body: payload,
+        expiresAt: Date.now() + SERVER_CACHE_TTL_MS,
+      });
+    }
+
+    return Response.json(payload, {
+      headers: {
+        'Cache-Control': 's-maxage=300, stale-while-revalidate',
+      },
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Search failed';
     return Response.json({ error: message }, { status: 500 });

@@ -7,12 +7,17 @@ interface TagPinInput {
   title?: string;
 }
 
-const ALLOWED_IMAGE_HOSTS = ['i.pinimg.com', 'images.unsplash.com'];
+const DISALLOWED_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1']);
 
 function isAllowedImageUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
-    return parsed.protocol === 'https:' && ALLOWED_IMAGE_HOSTS.includes(parsed.hostname);
+    if (parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname.toLowerCase();
+    if (DISALLOWED_HOSTS.has(host) || host.endsWith('.local') || host.endsWith('.internal')) {
+      return false;
+    }
+    return true;
   } catch {
     return false;
   }
@@ -21,7 +26,6 @@ function isAllowedImageUrl(url: string): boolean {
 async function fetchImageInlinePart(
   pin: TagPinInput
 ): Promise<{ id: string; mimeType: string; data: string } | null> {
-  // Prefer smaller 736x/474x fallback URL for fast multimodal tag inference
   const candidateUrl =
     pin.fallbackUrl && isAllowedImageUrl(pin.fallbackUrl)
       ? pin.fallbackUrl
@@ -99,7 +103,7 @@ export async function POST(request: Request): Promise<Response> {
     > = [
       {
         text:
-          'Analyze each image below and extract 3 to 4 concise, descriptive lowercase keywords (1-2 words each, e.g. "walnut desk", "minimalist", "serif quote", "dark ui", "linen chair") describing the visible subject, style, material, or mood. Return tags keyed to the exact id provided before each image.',
+          'Analyze each image below and extract 3 to 4 concise, descriptive lowercase keywords (1-2 words each, e.g. "amoled black", "neon city", "minimalist", "cyberpunk", "porsche gt3") describing the visible subject, style, material, or mood. Return tags keyed to the exact id provided before each image.',
       },
     ];
 

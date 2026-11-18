@@ -144,7 +144,7 @@ export function FilterStrip({
               title="Overlay a live mobile lockscreen clock on every wallpaper card in the grid"
               className={`flex h-9 items-center gap-2 rounded-lg border px-3 text-xs font-medium transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E60023] ${
                 lockscreenSim
-                  ? 'border-[#3B82F6]/60 bg-[#3B82F6]/15 text-[#2563EB] dark:text-[#60A5FA]'
+                  ? 'border-[#D91B42]/60 bg-[#D91B42]/15 text-[#D91B42] dark:text-[#FF6B88]'
                   : 'border-[#E5E7EB] bg-[#F9FAFB] text-[#4B5563] hover:text-[#111827] dark:border-[#1E222B] dark:bg-[#0B0D10] dark:text-[#9CA3AF] dark:hover:text-[#F3F4F6]'
               }`}
             >

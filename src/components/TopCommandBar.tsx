@@ -1,34 +1,37 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Camera,
   Clock,
   Database,
-  Heart,
-  History,
+  Grid3x3,
+  LayoutGrid,
   Moon,
   Search,
+  Settings,
   SlidersHorizontal,
   Smartphone,
-  Sparkles,
   Sun,
   Trash2,
-  Vibrate,
   WifiOff,
   X,
 } from 'lucide-react';
 import { formatRelativeTime } from '../services/cacheService';
-import { AppTab, RecentSearchEntry, SearchMode } from '../types/pin';
+import { isDirectPinUrl } from '../services/searchService';
+import { AppTab, GridDensity, RecentSearchEntry, SearchMode } from '../types/pin';
 
 export const QUICK_SEARCH_TOPICS: Array<{ label: string; query: string }> = [
   { label: 'AMOLED Dark 4K', query: 'AMOLED Dark Phone Wallpaper 4K' },
-  { label: 'Cyberpunk Neon', query: 'Cyberpunk Neon Phone Wallpaper' },
-  { label: 'Minimalist Abstract', query: 'Minimalist Abstract Phone Wallpaper' },
-  { label: 'Liquid Glass 3D', query: '3D Liquid Glass iPhone Wallpaper' },
+  { label: 'Cyberpunk Neon', query: 'Cyberpunk Neon Phone Wallpaper 4K' },
+  { label: '3D Liquid Glass', query: '3D Liquid Glass iPhone Wallpaper 4K' },
+  { label: 'Minimal', query: 'Minimalist Geometric Phone Wallpaper 4K' },
   { label: 'Anime Lockscreen', query: 'Anime Aesthetic Phone Wallpaper HD' },
   { label: 'Moody Nature', query: 'Moody Nature Vertical Phone Wallpaper' },
-  { label: 'Supercar 9:16', query: 'Supercar Vertical Phone Wallpaper 4K' },
-  { label: 'Retro Synthwave', query: 'Retro Synthwave Phone Wallpaper' },
-  { label: 'Motivation Lockscreen', query: 'Motivational Quote Lockscreen Wallpaper' },
-  { label: 'Minimalist Workspace', query: 'Minimalist Workspace' },
+  { label: 'Supercars 9:16', query: 'Supercar Vertical Phone Wallpaper 4K' },
+  { label: 'Vaporwave 80s', query: 'Retro Synthwave Vaporwave Phone Wallpaper 4K' },
+  { label: 'Space & Galaxy', query: 'Deep Space Galaxy Phone Wallpaper 4K' },
+  { label: 'Architecture', query: 'Dark Architecture Vertical Wallpaper 4K' },
+  { label: 'Dark Aesthetic', query: 'Dark Aesthetic Gothic Moody Phone Wallpaper 4K' },
+  { label: 'Luxury & Watches', query: 'Luxury Matte Black Gold Phone Wallpaper 4K' },
 ];
 
 interface TopCommandBarProps {
@@ -43,16 +46,17 @@ interface TopCommandBarProps {
   isLoading: boolean;
   isDark: boolean;
   onToggleTheme: () => void;
-  hapticsEnabled: boolean;
-  onToggleHaptics: () => void;
+  gridDensity: GridDensity;
+  onCycleGridDensity: () => void;
   searchInputRef: React.RefObject<HTMLInputElement | null>;
   recentSearches: RecentSearchEntry[];
   onRemoveRecentSearch: (query: string) => void;
   onClearRecentSearches: () => void;
-  favoritesCount: number;
-  onToggleShowFavorites: () => void;
   onOpenFiltersModal: () => void;
+  onOpenVisualSearch?: () => void;
+  onOpenSettings?: () => void;
   activeFilterCount: number;
+  showGridToggle?: boolean;
 }
 
 export function TopCommandBar({
@@ -62,36 +66,35 @@ export function TopCommandBar({
   onInputChange,
   onSearchSubmit,
   activeQuery,
-  mode,
   isOnline,
-  isLoading,
   isDark,
   onToggleTheme,
-  hapticsEnabled,
-  onToggleHaptics,
+  gridDensity,
+  onCycleGridDensity,
   searchInputRef,
   recentSearches,
   onRemoveRecentSearch,
   onClearRecentSearches,
-  favoritesCount,
-  onToggleShowFavorites,
   onOpenFiltersModal,
+  onOpenVisualSearch,
+  onOpenSettings,
   activeFilterCount,
+  showGridToggle = true,
 }: TopCommandBarProps) {
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [dropdownActiveIdx, setDropdownActiveIdx] = useState(-1);
   const searchWrapperRef = useRef<HTMLDivElement | null>(null);
+  const liveDebounceRef = useRef<number | null>(null);
 
-  const isExploreTab = activeTab === 'explore' && !isShowingFavorites;
+  const showSearchSection = activeTab === 'explore' && !isShowingFavorites;
 
   const filteredRecent = useMemo(() => {
     const q = inputValue.trim().toLowerCase();
-    if (!q || q === activeQuery.toLowerCase()) return recentSearches;
+    if (!q) return recentSearches;
     const matches = recentSearches.filter((item) => item.query.toLowerCase().includes(q));
     return matches.length > 0 ? matches : recentSearches;
-  }, [recentSearches, inputValue, activeQuery]);
+  }, [recentSearches, inputValue]);
 
-  // Close dropdown on outside click
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (
@@ -103,10 +106,23 @@ export function TopCommandBar({
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      if (liveDebounceRef.current) {
+        window.clearTimeout(liveDebounceRef.current);
+      }
+    };
   }, []);
 
+  const clearPendingDebounce = () => {
+    if (liveDebounceRef.current) {
+      window.clearTimeout(liveDebounceRef.current);
+      liveDebounceRef.current = null;
+    }
+  };
+
   const handleSelectRecent = (query: string) => {
+    clearPendingDebounce();
     onInputChange(query);
     setIsDropdownOpen(false);
     setDropdownActiveIdx(-1);
@@ -116,13 +132,42 @@ export function TopCommandBar({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    clearPendingDebounce();
     if (dropdownActiveIdx >= 0 && filteredRecent[dropdownActiveIdx]) {
       handleSelectRecent(filteredRecent[dropdownActiveIdx].query);
       return;
     }
+    const trimmed = inputValue.trim();
+    if (!trimmed) return;
     setIsDropdownOpen(false);
     setDropdownActiveIdx(-1);
-    onSearchSubmit();
+    onSearchSubmit(trimmed);
+    searchInputRef.current?.blur();
+  };
+
+  const handleLiveInputChange = (nextVal: string) => {
+    onInputChange(nextVal);
+    setDropdownActiveIdx(-1);
+    clearPendingDebounce();
+
+    const trimmed = nextVal.trim();
+    if (!trimmed) return;
+
+    if (isDirectPinUrl(trimmed)) {
+      liveDebounceRef.current = window.setTimeout(() => {
+        setIsDropdownOpen(false);
+        onSearchSubmit(trimmed);
+      }, 240);
+      return;
+    }
+
+    if (trimmed.length >= 3) {
+      liveDebounceRef.current = window.setTimeout(() => {
+        if (trimmed.toLowerCase() !== activeQuery.trim().toLowerCase()) {
+          onSearchSubmit(trimmed);
+        }
+      }, 550);
+    }
   };
 
   const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -147,371 +192,336 @@ export function TopCommandBar({
     }
   };
 
-  const statusBadge = !isOnline
-    ? {
-        label: 'Offline · Local Cache',
-        dotClass: 'bg-amber-500',
-        containerClass:
-          'border-amber-500/35 bg-amber-500/10 text-amber-700 dark:text-amber-300',
-        title: 'Browser is offline. Wallpapers are served from local cache.',
-      }
-    : mode === 'live'
-    ? {
-        label: '4K Live Wallpaper Engine',
-        dotClass: 'bg-emerald-500',
-        containerClass:
-          'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
-        title: 'Connected to live high-resolution Pinterest wallpaper engine',
-      }
-    : mode === 'cached'
-    ? {
-        label: 'Cached Vault Mode',
-        dotClass: 'bg-amber-500',
-        containerClass:
-          'border-amber-500/35 bg-amber-500/10 text-amber-700 dark:text-amber-300',
-        title: 'Serving locally cached wallpapers',
-      }
-    : {
-        label: 'Studio Wallpaper Mode',
-        dotClass: 'bg-amber-500',
-        containerClass:
-          'border-[#E5E7EB] bg-[#F3F4F6] text-[#4B5563] dark:border-[#1E222B] dark:bg-[#14171D] dark:text-[#9CA3AF]',
-        title: 'Using built-in high-res studio wallpaper generator.',
-      };
+  const pageContextLabel = isShowingFavorites
+    ? 'Library'
+    : activeTab === 'studio'
+    ? 'Studio'
+    : null;
+
+  const gridBadgeText =
+    gridDensity === 'ultra' ? '4×' : gridDensity === 'compact' ? '3×' : '2×';
 
   return (
-    <header className="sticky top-0 z-30 border-b border-[#E5E7EB] bg-[#FFFFFF]/95 backdrop-blur-md dark:border-[#1E222B] dark:bg-[#0B0D10]/95">
-      <div className="mx-auto max-w-[1440px] px-4 py-3 sm:px-6 lg:px-8">
-        {/* Main compact brand & tools row */}
-        <div className="flex flex-wrap items-center justify-between gap-3 md:flex-nowrap md:gap-4">
-          {/* Brand + Connection Status */}
-          <div className="flex items-center gap-3 shrink-0">
+    <header className="sticky top-0 z-30 w-full max-w-full border-b border-slate-200/80 bg-white/95 backdrop-blur-xl pt-safe dark:border-white/[0.07] dark:bg-[#050505]/95">
+      <div className="mx-auto w-full max-w-[1440px] px-3 py-2.5 sm:px-6 lg:px-8">
+        {/* Decluttered Top Row: PinGrab 2.0 Logo Left · Grid Toggle, Theme, Settings Right */}
+        <div className="flex w-full min-w-0 items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-2 sm:gap-3">
             <a
               href="#top"
               onClick={(e) => {
                 e.preventDefault();
+                clearPendingDebounce();
                 const defaultTopic = QUICK_SEARCH_TOPICS[0].query;
-                onInputChange(defaultTopic);
+                onInputChange('');
                 setIsDropdownOpen(false);
                 onSearchSubmit(defaultTopic);
               }}
-              className="flex items-center gap-2.5 whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E60023] rounded-lg"
+              className="flex min-w-0 items-center gap-2.5 rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D91B42]"
             >
-              <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#E60023] text-white shadow-sm">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[12px] bg-[#D91B42] text-white shadow-[0_4px_14px_rgba(217,27,66,0.35)]">
                 <Smartphone className="h-4.5 w-4.5" aria-hidden="true" />
               </span>
-              <div className="flex flex-col">
-                <span className="font-display text-lg font-bold leading-none tracking-tight text-[#111827] dark:text-[#F3F4F6]">
-                  PinGrab
-                </span>
-                <span className="mt-0.5 font-mono text-[10px] font-medium tracking-wider uppercase text-[#6B7280] dark:text-[#9CA3AF]">
-                  OG Wallpapers
+              <div className="flex min-w-0 flex-col">
+                <div className="flex items-center gap-1.5">
+                  <span className="font-display text-base font-bold leading-none tracking-tight text-slate-900 dark:text-white sm:text-lg truncate">
+                    PinGrab
+                  </span>
+                  <span className="rounded bg-[#D91B42]/15 px-1.5 py-0.5 font-mono text-[9px] font-bold text-[#D91B42]">
+                    2.0
+                  </span>
+                </div>
+                <span className="mt-0.5 text-[10px] font-medium tracking-wide text-slate-500 dark:text-[#94A3B8] truncate">
+                  4K Wallpapers &amp; Studio
                 </span>
               </div>
             </a>
 
-            <span
-              className={`hidden lg:inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium whitespace-nowrap shrink-0 ${statusBadge.containerClass}`}
-              title={statusBadge.title}
-            >
-              {!isOnline ? (
-                <WifiOff className="h-3 w-3" aria-hidden="true" />
-              ) : (
+            {pageContextLabel && (
+              <div className="flex items-center gap-2 min-w-0">
                 <span
-                  className={`h-1.5 w-1.5 rounded-full ${statusBadge.dotClass}`}
+                  className="h-4 w-px shrink-0 bg-slate-200 dark:bg-white/10"
                   aria-hidden="true"
                 />
-              )}
-              {statusBadge.label}
-            </span>
+                <span className="font-display text-xs sm:text-sm font-semibold text-slate-700 dark:text-slate-200 truncate">
+                  {pageContextLabel}
+                </span>
+              </div>
+            )}
+
+            {!isOnline && (
+              <span
+                className="hidden md:inline-flex items-center gap-1.5 text-xs font-medium text-amber-600 dark:text-amber-400 shrink-0"
+                title="Browser is offline. Wallpapers are served from local cache."
+              >
+                <WifiOff className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Offline Cache</span>
+              </span>
+            )}
           </div>
 
-          {/* Search Bar (Visible ONLY on Explore tab) */}
-          {isExploreTab ? (
-            <div
-              ref={searchWrapperRef}
-              className="relative order-3 w-full md:order-2 md:flex-1 md:max-w-2xl"
-            >
-              <form onSubmit={handleSubmit} role="search">
-                <div className="relative flex items-center">
-                  <Search
-                    className="pointer-events-none absolute left-3.5 h-4 w-4 text-[#6B7280] dark:text-[#9CA3AF]"
-                    aria-hidden="true"
-                  />
-                  <input
-                    ref={searchInputRef}
-                    type="text"
-                    value={inputValue}
-                    onFocus={() => {
-                      if (recentSearches.length > 0) setIsDropdownOpen(true);
-                    }}
-                    onChange={(e) => {
-                      onInputChange(e.target.value);
-                      setDropdownActiveIdx(-1);
-                      if (recentSearches.length > 0) setIsDropdownOpen(true);
-                    }}
-                    onKeyDown={handleInputKeyDown}
-                    placeholder="Search 4K wallpapers, AMOLED themes, or paste a pinterest.com/pin/... URL..."
-                    aria-label="Search mobile wallpapers or paste a direct Pinterest pin URL"
-                    aria-expanded={isDropdownOpen}
-                    aria-controls="recent-searches-dropdown"
-                    className="h-11 w-full rounded-xl border border-[#E5E7EB] bg-[#F9FAFB] pl-10 pr-44 text-sm text-[#111827] placeholder-[#6B7280] transition-colors focus:border-[#E60023] focus:bg-white focus:outline-none dark:border-[#1E222B] dark:bg-[#14171D] dark:text-[#F3F4F6] dark:placeholder-[#6B7280] dark:focus:border-[#E60023] dark:focus:bg-[#14171D]"
-                  />
-
-                  <div className="absolute right-1.5 flex items-center gap-1">
-                    {/* Filters & Sort Modal Trigger Button with Active Badge Count */}
-                    <button
-                      type="button"
-                      onClick={onOpenFiltersModal}
-                      aria-label="Open Filters and Sort Modal"
-                      title="Filters & Sort Options"
-                      className="relative flex h-8 items-center gap-1 rounded-lg border border-[#E5E7EB] bg-white px-2.5 text-xs font-semibold text-[#374151] shadow-xs transition-colors hover:bg-[#F3F4F6] hover:text-[#111827] dark:border-[#242A36] dark:bg-[#1C212C] dark:text-[#D1D5DB] dark:hover:bg-[#252C3A]"
-                    >
-                      <SlidersHorizontal className="h-3.5 w-3.5 text-[#E60023]" />
-                      <span className="hidden sm:inline">Filters</span>
-                      {activeFilterCount > 0 && (
-                        <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-[#E60023] font-mono text-[9px] font-bold text-white tabular-nums">
-                          {activeFilterCount}
-                        </span>
-                      )}
-                    </button>
-
-                    {inputValue && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          onInputChange('');
-                          searchInputRef.current?.focus();
-                        }}
-                        aria-label="Clear search query"
-                        className="flex h-8 w-8 items-center justify-center rounded-lg text-[#6B7280] transition-colors hover:bg-[#E5E7EB]/60 hover:text-[#111827] dark:text-[#9CA3AF] dark:hover:bg-[#1E222B] dark:hover:text-[#F3F4F6]"
-                      >
-                        <X className="h-4 w-4" />
-                      </button>
-                    )}
-
-                    <button
-                      type="submit"
-                      disabled={isLoading || !inputValue.trim()}
-                      className="h-8 rounded-lg bg-[#E60023] px-3.5 text-xs font-semibold text-white transition-colors hover:bg-[#CC001F] disabled:cursor-not-allowed disabled:opacity-50 whitespace-nowrap shrink-0"
-                    >
-                      {isLoading ? 'Searching…' : 'Search'}
-                    </button>
-                  </div>
-                </div>
-              </form>
-
-              {/* Recent Searches Dropdown */}
-              {isDropdownOpen && (
-                <div
-                  id="recent-searches-dropdown"
-                  role="listbox"
-                  aria-label="Recent Searches"
-                  className="absolute top-full right-0 left-0 z-50 mt-2 overflow-hidden rounded-xl border border-[#E5E7EB] bg-white shadow-xl dark:border-[#242A36] dark:bg-[#14171D]"
-                >
-                  <div className="flex items-center justify-between border-b border-[#E5E7EB] px-3.5 py-2.5 dark:border-[#1E222B]">
-                    <span className="text-xs font-semibold text-[#374151] dark:text-[#D1D5DB]">
-                      Recent Wallpaper Searches
-                    </span>
-                    {recentSearches.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          onClearRecentSearches();
-                          setDropdownActiveIdx(-1);
-                        }}
-                        className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-[#6B7280] transition-colors hover:bg-[#F3F4F6] hover:text-[#E60023] dark:text-[#9CA3AF] dark:hover:bg-[#1E222B] dark:hover:text-[#FF4D67]"
-                      >
-                        <Trash2 className="h-3 w-3" aria-hidden="true" />
-                        <span>Clear All</span>
-                      </button>
-                    )}
-                  </div>
-
-                  {filteredRecent.length === 0 ? (
-                    <div className="px-4 py-6 text-center text-xs text-[#6B7280] dark:text-[#9CA3AF]">
-                      No recent searches yet. Your wallpaper history and offline cache will appear here.
-                    </div>
-                  ) : (
-                    <ul className="max-h-72 overflow-y-auto py-1">
-                      {filteredRecent.map((item, idx) => {
-                        const isActiveRow = idx === dropdownActiveIdx;
-                        const isCurrent =
-                          item.query.toLowerCase() === activeQuery.toLowerCase();
-
-                        return (
-                          <li
-                            key={item.query}
-                            role="option"
-                            aria-selected={isActiveRow}
-                            className={`group flex items-center justify-between gap-2 px-2 py-1 ${
-                              isActiveRow
-                                ? 'bg-[#F3F4F6] dark:bg-[#1E222B]'
-                                : 'hover:bg-[#F9FAFB] dark:hover:bg-[#191D25]'
-                            }`}
-                          >
-                            <button
-                              type="button"
-                              onClick={() => handleSelectRecent(item.query)}
-                              className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-2 py-1.5 text-left"
-                            >
-                              <Clock
-                                className={`h-3.5 w-3.5 shrink-0 ${
-                                  isCurrent
-                                    ? 'text-[#E60023]'
-                                    : 'text-[#6B7280] dark:text-[#9CA3AF]'
-                                }`}
-                                aria-hidden="true"
-                              />
-                              <span
-                                className={`truncate text-xs font-medium ${
-                                  isCurrent
-                                    ? 'text-[#E60023] dark:text-[#FF4D67]'
-                                    : 'text-[#111827] dark:text-[#F3F4F6]'
-                                }`}
-                              >
-                                {item.query}
-                              </span>
-                            </button>
-
-                            <div className="flex items-center gap-2 pr-1 shrink-0">
-                              <span className="hidden sm:inline-flex items-center gap-1.5 text-[11px] text-[#6B7280] dark:text-[#9CA3AF] tabular-nums">
-                                {item.hasCachedResults && (
-                                  <span
-                                    className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400"
-                                    title="Saved offline in local cache"
-                                  >
-                                    <Database className="h-3 w-3" aria-hidden="true" />
-                                    <span>Cached</span>
-                                    <span aria-hidden="true">·</span>
-                                  </span>
-                                )}
-                                <span>{item.resultCount} walls</span>
-                                <span aria-hidden="true">·</span>
-                                <span aria-hidden="true">{formatRelativeTime(item.timestamp)}</span>
-                              </span>
-
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  onRemoveRecentSearch(item.query);
-                                }}
-                                aria-label={`Remove ${item.query} from recent searches`}
-                                className="flex h-7 w-7 items-center justify-center rounded-md text-[#6B7280] opacity-70 transition-colors hover:bg-[#E5E7EB] hover:text-[#111827] hover:opacity-100 dark:text-[#9CA3AF] dark:hover:bg-[#2A303C] dark:hover:text-[#F3F4F6]"
-                              >
-                                <X className="h-3.5 w-3.5" />
-                              </button>
-                            </div>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  )}
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="order-2 flex-1 md:order-2 flex items-center">
-              <span className="font-display text-sm font-semibold text-[#6B7280] dark:text-[#9CA3AF] capitalize">
-                {isShowingFavorites ? 'Saved Wallpapers Vault' : `${activeTab} View`}
-              </span>
-            </div>
-          )}
-
-          {/* Saved Wallpapers Vault + Haptics Toggle + Theme Toggle */}
-          <div className="order-2 flex items-center gap-2 md:order-3 shrink-0">
-            <button
-              type="button"
-              onClick={onToggleShowFavorites}
-              aria-pressed={isShowingFavorites}
-              title="Open Saved Wallpapers Vault"
-              className={`flex h-10 items-center gap-1.5 rounded-xl border px-3 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E60023] ${
-                isShowingFavorites
-                  ? 'border-[#E60023] bg-[#E60023] text-white shadow-sm'
-                  : 'border-[#E5E7EB] bg-[#F9FAFB] text-[#374151] hover:bg-[#F3F4F6] hover:text-[#111827] dark:border-[#1E222B] dark:bg-[#14171D] dark:text-[#D1D5DB] dark:hover:bg-[#1E222B] dark:hover:text-[#F3F4F6]'
-              }`}
-            >
-              <Heart
-                className={`h-3.5 w-3.5 ${
-                  isShowingFavorites
-                    ? 'fill-white text-white'
-                    : favoritesCount > 0
-                    ? 'fill-[#E60023] text-[#E60023]'
-                    : ''
+          {/* Right Controls: Context-Aware Grid Toggle (2x/3x), Dark Mode, and Settings */}
+          <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+            {showGridToggle && (
+              <button
+                type="button"
+                onClick={onCycleGridDensity}
+                title={`Grid Layout: ${gridBadgeText} columns`}
+                aria-label={`Toggle wallpaper grid density, currently ${gridBadgeText} columns`}
+                className={`flex h-9 sm:h-10 items-center gap-1.5 rounded-[12px] border px-2.5 sm:px-3 text-xs font-semibold transition-all whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D91B42] active:scale-95 ${
+                  gridDensity !== 'standard'
+                    ? 'border-[#D91B42]/55 bg-[#D91B42]/12 text-[#D91B42]'
+                    : 'border-slate-200 bg-slate-100/80 text-slate-700 hover:bg-slate-200/70 dark:border-white/[0.08] dark:bg-[#101010] dark:text-slate-200 dark:hover:bg-[#171717]'
                 }`}
-                aria-hidden="true"
-              />
-              <span className="hidden sm:inline">Saved</span>
-              <span className="font-mono text-[11px] tabular-nums">({favoritesCount})</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={onToggleHaptics}
-              aria-label={hapticsEnabled ? 'Disable Haptic Feedback' : 'Enable Haptic Feedback'}
-              title={hapticsEnabled ? 'Haptic feedback is ON' : 'Haptic feedback is OFF'}
-              className={`flex h-10 items-center gap-1.5 rounded-xl border px-3 text-xs font-medium transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E60023] ${
-                hapticsEnabled
-                  ? 'border-[#3B82F6]/50 bg-[#3B82F6]/15 text-[#2563EB] dark:text-[#60A5FA]'
-                  : 'border-[#E5E7EB] bg-[#F9FAFB] text-[#6B7280] hover:text-[#111827] dark:border-[#1E222B] dark:bg-[#14171D] dark:text-[#9CA3AF] dark:hover:text-[#F3F4F6]'
-              }`}
-            >
-              <Vibrate className="h-4 w-4" aria-hidden="true" />
-              <span className="hidden sm:inline">Haptics</span>
-            </button>
+              >
+                {gridDensity === 'standard' ? (
+                  <LayoutGrid className="h-3.5 w-3.5 shrink-0 text-[#D91B42]" aria-hidden="true" />
+                ) : (
+                  <Grid3x3 className="h-3.5 w-3.5 shrink-0 text-[#D91B42]" aria-hidden="true" />
+                )}
+                <span className="font-mono text-[11px] font-bold tabular-nums">
+                  {gridBadgeText}
+                </span>
+              </button>
+            )}
 
             <button
               type="button"
               onClick={onToggleTheme}
               aria-label={isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
-              className="flex h-10 items-center gap-2 rounded-xl border border-[#E5E7EB] bg-[#F9FAFB] px-3.5 text-xs font-medium text-[#374151] transition-colors hover:bg-[#F3F4F6] hover:text-[#111827] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E60023] dark:border-[#1E222B] dark:bg-[#14171D] dark:text-[#D1D5DB] dark:hover:bg-[#1E222B] dark:hover:text-[#F3F4F6] whitespace-nowrap shrink-0"
+              title={isDark ? 'Switch to Light Mode' : 'Switch to AMOLED Dark Mode'}
+              className="flex h-9 w-9 sm:h-10 sm:w-10 items-center justify-center rounded-[12px] border border-slate-200 bg-slate-100/80 text-slate-700 transition-colors hover:bg-slate-200/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D91B42] dark:border-white/[0.08] dark:bg-[#101010] dark:text-slate-200 dark:hover:bg-[#171717] shrink-0 active:scale-95"
             >
               {isDark ? (
-                <>
-                  <Sun className="h-4 w-4 text-amber-400" aria-hidden="true" />
-                  <span className="hidden sm:inline">Light</span>
-                </>
+                <Sun className="h-4 w-4 text-amber-400 shrink-0" aria-hidden="true" />
               ) : (
-                <>
-                  <Moon className="h-4 w-4 text-[#4B5563]" aria-hidden="true" />
-                  <span className="hidden sm:inline">Dark</span>
-                </>
+                <Moon className="h-4 w-4 text-slate-700 shrink-0" aria-hidden="true" />
               )}
             </button>
+
+            {onOpenSettings && (
+              <button
+                type="button"
+                onClick={onOpenSettings}
+                aria-label="Open PinGrab 2.0 Settings"
+                title="Settings & Personalization"
+                className="flex h-9 w-9 sm:h-10 sm:w-10 items-center justify-center rounded-[12px] border border-slate-200 bg-slate-100/80 text-slate-700 transition-colors hover:bg-slate-200/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D91B42] dark:border-white/[0.08] dark:bg-[#101010] dark:text-slate-200 dark:hover:bg-[#171717] shrink-0 active:scale-95"
+              >
+                <Settings className="h-4 w-4" aria-hidden="true" />
+              </button>
+            )}
           </div>
         </div>
 
-        {/* Quick-search chips row (Visible ONLY on Explore tab, native scrollbar hidden) */}
-        {isExploreTab && (
-          <div className="mt-3 flex items-center gap-2 overflow-x-auto pb-0.5 scrollbar-none no-scrollbar [-webkit-overflow-scrolling:touch]">
-            <span className="text-xs font-medium text-[#6B7280] dark:text-[#9CA3AF] whitespace-nowrap shrink-0">
-              Quick search:
-            </span>
-            {QUICK_SEARCH_TOPICS.map((topic) => {
-              const isActive =
-                !isShowingFavorites &&
-                (activeQuery.toLowerCase() === topic.query.toLowerCase() ||
-                  activeQuery.toLowerCase() === topic.label.toLowerCase());
-              return (
-                <button
-                  key={topic.label}
-                  type="button"
-                  onClick={() => {
-                    onInputChange(topic.query);
-                    setIsDropdownOpen(false);
-                    onSearchSubmit(topic.query);
-                  }}
-                  className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E60023] ${
-                    isActive
-                      ? 'border-[#E60023] bg-[#E60023]/10 text-[#E60023] dark:bg-[#E60023]/15 dark:text-[#FF4D67]'
-                      : 'border-[#E5E7EB] bg-[#F9FAFB] text-[#374151] hover:border-[#D1D5DB] hover:bg-[#F3F4F6] dark:border-[#1E222B] dark:bg-[#14171D] dark:text-[#D1D5DB] dark:hover:border-[#2E3442] dark:hover:bg-[#1A1E26]'
-                  }`}
+        {/* Clean Search Bar (Enter or Live Typing) + Top Category Pills */}
+        {showSearchSection && (
+          <div className="mt-2.5 w-full min-w-0 space-y-2.5">
+            <div ref={searchWrapperRef} className="relative w-full min-w-0">
+              <form onSubmit={handleSubmit} role="search" className="w-full min-w-0">
+                <div className="flex h-11 sm:h-12 w-full min-w-0 items-center gap-2 rounded-[16px] border border-slate-200/90 bg-slate-100/90 pl-3.5 pr-1.5 transition-all focus-within:border-[#D91B42] focus-within:bg-white focus-within:ring-2 focus-within:ring-[#D91B42]/20 dark:border-white/[0.08] dark:bg-[#101010] dark:focus-within:border-[#D91B42] dark:focus-within:bg-[#171717]">
+                  <Search
+                    className="h-4 w-4 shrink-0 text-slate-400 dark:text-[#94A3B8]"
+                    aria-hidden="true"
+                  />
+
+                  <input
+                    ref={searchInputRef}
+                    type="text"
+                    value={inputValue}
+                    onFocus={() => {
+                      if (recentSearches.length > 0) {
+                        setIsDropdownOpen(true);
+                      }
+                    }}
+                    onChange={(e) => handleLiveInputChange(e.target.value)}
+                    onKeyDown={handleInputKeyDown}
+                    placeholder="Search 4K wallpapers or paste link..."
+                    aria-label="Search 4K wallpapers or paste a direct Pinterest link"
+                    aria-expanded={isDropdownOpen}
+                    aria-controls="recent-searches-dropdown"
+                    autoComplete="off"
+                    className="min-w-0 flex-1 bg-transparent text-xs sm:text-sm text-slate-900 placeholder-slate-400 focus:outline-none dark:text-white dark:placeholder-[#64748B]"
+                  />
+
+                  {/* Right Actions: Clear (when typing), Camera (Visual AI), Filter */}
+                  <div className="flex shrink-0 items-center gap-1">
+                    {inputValue && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          clearPendingDebounce();
+                          onInputChange('');
+                          searchInputRef.current?.focus();
+                        }}
+                        aria-label="Clear search query"
+                        className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-200/60 hover:text-slate-800 dark:text-[#94A3B8] dark:hover:bg-white/10 dark:hover:text-white"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    )}
+
+                    {onOpenVisualSearch && (
+                      <button
+                        type="button"
+                        onClick={onOpenVisualSearch}
+                        aria-label="Visual AI Search by Image"
+                        title="Visual AI Search — Upload an image to find matching wallpapers"
+                        className="flex h-8.5 w-8.5 sm:h-9 sm:w-9 items-center justify-center rounded-[11px] border border-slate-200 bg-white text-slate-700 transition-colors hover:border-[#D91B42]/50 hover:bg-slate-100 dark:border-white/[0.08] dark:bg-[#171717] dark:text-slate-200 dark:hover:bg-white/10 shrink-0"
+                      >
+                        <Camera className="h-4 w-4 text-[#D91B42]" aria-hidden="true" />
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={onOpenFiltersModal}
+                      aria-label="Open Filters and Sort Modal"
+                      title="Filters, Resolution, Color Palette & Grid Density"
+                      className="relative flex h-8.5 w-8.5 sm:h-9 sm:w-9 items-center justify-center rounded-[11px] border border-slate-200 bg-white text-slate-700 transition-colors hover:border-[#D91B42]/50 hover:bg-slate-100 dark:border-white/[0.08] dark:bg-[#171717] dark:text-slate-200 dark:hover:bg-white/10 shrink-0"
+                    >
+                      <SlidersHorizontal className="h-4 w-4 text-[#D91B42]" aria-hidden="true" />
+                      {activeFilterCount > 0 && (
+                        <span className="absolute -top-1 -right-1 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-[#D91B42] px-1 font-mono text-[9px] font-bold text-white tabular-nums shadow-xs">
+                          {activeFilterCount}
+                        </span>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </form>
+
+              {/* Recent Searches Dropdown (Triggered on focus / ArrowDown) */}
+              {isDropdownOpen && recentSearches.length > 0 && (
+                <div
+                  id="recent-searches-dropdown"
+                  role="listbox"
+                  aria-label="Recent Searches"
+                  className="absolute top-full right-0 left-0 z-50 mt-2 overflow-hidden rounded-[16px] border border-slate-200 bg-white shadow-2xl dark:border-white/[0.08] dark:bg-[#171717]"
                 >
-                  {topic.label}
-                </button>
-              );
-            })}
+                  <div className="flex items-center justify-between border-b border-slate-100 px-3.5 py-2.5 dark:border-white/[0.06]">
+                    <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                      Recent Wallpaper Searches
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onClearRecentSearches();
+                        setDropdownActiveIdx(-1);
+                        setIsDropdownOpen(false);
+                      }}
+                      className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-slate-500 transition-colors hover:bg-slate-100 hover:text-[#D91B42] dark:text-[#94A3B8] dark:hover:bg-white/5 dark:hover:text-[#D91B42]"
+                    >
+                      <Trash2 className="h-3 w-3" aria-hidden="true" />
+                      <span>Clear All</span>
+                    </button>
+                  </div>
+
+                  <ul className="max-h-64 overflow-y-auto py-1">
+                    {filteredRecent.map((item, idx) => {
+                      const isActiveRow = idx === dropdownActiveIdx;
+                      const isCurrent =
+                        item.query.toLowerCase() === activeQuery.toLowerCase();
+
+                      return (
+                        <li
+                          key={item.query}
+                          role="option"
+                          aria-selected={isActiveRow}
+                          className={`group flex items-center justify-between gap-2 px-2 py-1 ${
+                            isActiveRow
+                              ? 'bg-slate-100 dark:bg-white/10'
+                              : 'hover:bg-slate-50 dark:hover:bg-white/5'
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => handleSelectRecent(item.query)}
+                            className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-2 py-1.5 text-left"
+                          >
+                            <Clock
+                              className={`h-3.5 w-3.5 shrink-0 ${
+                                isCurrent
+                                  ? 'text-[#D91B42]'
+                                  : 'text-slate-400 dark:text-[#94A3B8]'
+                              }`}
+                              aria-hidden="true"
+                            />
+                            <span
+                              className={`truncate text-xs font-medium ${
+                                isCurrent
+                                  ? 'text-[#D91B42]'
+                                  : 'text-slate-900 dark:text-white'
+                              }`}
+                            >
+                              {item.query}
+                            </span>
+                          </button>
+
+                          <div className="flex items-center gap-2 pr-1 shrink-0">
+                            <span className="hidden sm:inline-flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-[#94A3B8] tabular-nums">
+                              {item.hasCachedResults && (
+                                <span
+                                  className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400"
+                                  title="Saved offline in local cache"
+                                >
+                                  <Database className="h-3 w-3" aria-hidden="true" />
+                                  <span>Cached</span>
+                                  <span aria-hidden="true">·</span>
+                                </span>
+                              )}
+                              <span>{item.resultCount} walls</span>
+                              <span aria-hidden="true">·</span>
+                              <span>{formatRelativeTime(item.timestamp)}</span>
+                            </span>
+
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onRemoveRecentSearch(item.query);
+                              }}
+                              aria-label={`Remove ${item.query} from recent searches`}
+                              className="flex h-7 w-7 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-slate-200 hover:text-slate-900 dark:text-[#94A3B8] dark:hover:bg-white/10 dark:hover:text-white"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              )}
+            </div>
+
+            {/* Quick-Search Category Pills Row */}
+            <div className="flex w-full max-w-full min-w-0 items-center gap-1.5 overflow-x-auto pb-0.5 no-scrollbar [-webkit-overflow-scrolling:touch]">
+              {QUICK_SEARCH_TOPICS.map((topic) => {
+                const isActive =
+                  !isShowingFavorites &&
+                  (activeQuery.toLowerCase() === topic.query.toLowerCase() ||
+                    activeQuery.toLowerCase() === topic.label.toLowerCase());
+                return (
+                  <button
+                    key={topic.label}
+                    type="button"
+                    onClick={() => {
+                      clearPendingDebounce();
+                      onInputChange('');
+                      setIsDropdownOpen(false);
+                      onSearchSubmit(topic.query);
+                    }}
+                    className={`h-8 rounded-[10px] border px-3 text-xs font-semibold transition-all whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D91B42] active:scale-95 ${
+                      isActive
+                        ? 'border-[#D91B42] bg-[#D91B42] text-white shadow-[0_2px_10px_rgba(217,27,66,0.28)]'
+                        : 'border-slate-200/80 bg-slate-100/70 text-slate-700 hover:border-slate-300 hover:bg-slate-200/60 dark:border-white/[0.07] dark:bg-[#101010] dark:text-[#94A3B8] dark:hover:border-white/15 dark:hover:bg-[#171717] dark:hover:text-white'
+                    }`}
+                  >
+                    {topic.label}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         )}
       </div>

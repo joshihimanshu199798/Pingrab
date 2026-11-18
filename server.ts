@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import { GET as searchHandler } from './api/search.ts';
 import { GET as downloadHandler } from './api/download.ts';
 import { POST as tagsHandler } from './api/tags.ts';
+import { POST as aiVisionHandler } from './api/ai-vision.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -50,12 +51,13 @@ async function startServer() {
   const port = Number(process.env.PORT) || 3000;
 
   app.set('trust proxy', 1);
-  app.use(express.json({ limit: '2mb' }));
+  app.use(express.json({ limit: '8mb' }));
 
-  // Keyless search, high-res download proxy, and ML visual tagger endpoints
+  // Keyless search, high-res download proxy, ML visual tagger, and AI visual intelligence endpoints
   app.get('/api/search', (req, res) => void pipeWebHandler(req, res, searchHandler));
   app.get('/api/download', (req, res) => void pipeWebHandler(req, res, downloadHandler));
   app.post('/api/tags', (req, res) => void pipeWebHandler(req, res, tagsHandler));
+  app.post('/api/ai-vision', (req, res) => void pipeWebHandler(req, res, aiVisionHandler));
 
   const publicDir = path.resolve(__dirname, 'public');
   if (fs.existsSync(publicDir)) {
@@ -80,7 +82,7 @@ async function startServer() {
   }
 
   app.listen(port, '0.0.0.0', () => {
-    console.log(`PinGrab server listening on http://0.0.0.0:${port}`);
+    console.log(`PinGrab 2.0 server listening on http://0.0.0.0:${port}`);
   });
 }
 
