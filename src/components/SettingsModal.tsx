@@ -10,6 +10,7 @@ import {
   X,
 } from 'lucide-react';
 import { GridDensity, ThemeVariant, UserSettings } from '../types/pin';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -69,6 +70,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-5 space-y-6">
+          {/* Install Mobile App / Android PWA Card */}
+          <PWAInstallButton variant="card" />
+
           {/* Theme Mode */}
           <div className="space-y-2.5">
             <label className="text-xs font-bold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">

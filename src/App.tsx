@@ -25,6 +25,7 @@ import { FilterModal } from './components/FilterModal';
 import { LightboxModal } from './components/LightboxModal';
 import { PinCard } from './components/PinCard';
 import { SettingsModal } from './components/SettingsModal';
+import { OfflineIndicator } from './components/PWAInstallButton';
 import { SmartLibraryView } from './components/SmartLibraryView';
 import { QUICK_SEARCH_TOPICS, TopCommandBar } from './components/TopCommandBar';
 import { WallpaperStudioEditor } from './components/WallpaperStudioEditor';
@@ -1743,6 +1744,9 @@ export default function App() {
         onClear={handleClearSelection}
         onDownloadZip={handleBatchDownloadZip}
       />
+
+      {/* Non-intrusive PWA Offline Connectivity Indicator */}
+      <OfflineIndicator />
 
       {/* Bottom Navigation Bar (5 Tabs: Discover, Search, Wallpapers, Studio, Library) */}
       <BottomNavBar

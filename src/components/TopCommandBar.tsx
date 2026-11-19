@@ -18,6 +18,7 @@ import {
 import { formatRelativeTime } from '../services/cacheService';
 import { isDirectPinUrl } from '../services/searchService';
 import { AppTab, GridDensity, RecentSearchEntry, SearchMode } from '../types/pin';
+import { PWAInstallButton } from './PWAInstallButton';
 
 export const QUICK_SEARCH_TOPICS: Array<{ label: string; query: string }> = [
   { label: 'AMOLED Dark 4K', query: 'AMOLED Dark Phone Wallpaper 4K' },
@@ -260,8 +261,9 @@ export function TopCommandBar({
             )}
           </div>
 
-          {/* Right Controls: Context-Aware Grid Toggle (2x/3x), Dark Mode, and Settings */}
+          {/* Right Controls: Context-Aware Install Button, Grid Toggle (2x/3x), Dark Mode, and Settings */}
           <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+            <PWAInstallButton variant="compact" />
             {showGridToggle && (
               <button
                 type="button"
